@@ -352,6 +352,9 @@ insight_engine_streamlit_reports/
 media_engine_streamlit_reports/
 query_engine_streamlit_reports/
 final_reports/
+InsightEngine/reports/
+MediaEngine/reports/
+QueryEngine/reports/
 forward_prs.sh
 
 # Claude Code settings
