@@ -870,6 +870,8 @@ class DeepSearchAgent:
                         "author": result.author_nickname,
                         "engagement": result.engagement,
                         "source_keyword": result.source_keyword,
+                        "sentiment_label": result.sentiment_label,
+                        "sentiment_confidence": result.sentiment_confidence,
                     }
                 )
 
@@ -1035,6 +1037,8 @@ class DeepSearchAgent:
                             "author": result.author_nickname,
                             "engagement": result.engagement,
                             "source_keyword": result.source_keyword,
+                            "sentiment_label": result.sentiment_label,
+                            "sentiment_confidence": result.sentiment_confidence,
                         }
                     )
 

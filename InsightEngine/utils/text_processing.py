@@ -333,6 +333,13 @@ def build_search_stats_block(search_results: List[Dict[str, Any]]) -> str:
     peak_day = max(by_day.items(), key=lambda kv: kv[1]) if by_day else None
     peak_desc = f"{peak_day[0]}（{peak_day[1]}条）" if peak_day else "未提供"
 
+    # 情感分布（仅当数据已标注时）
+    sentiment_counts: Dict[str, int] = {}
+    for r in search_results:
+        s = r.get('sentiment_label') or r.get('sentiment')
+        if s:
+            sentiment_counts[s] = sentiment_counts.get(s, 0) + 1
+
     parts = [
         f"命中总条数：{total}条",
         f"平台分布：{'、'.join(f'{k} {v}条' for k, v in sorted(platforms.items(), key=lambda kv: -kv[1]))}",
@@ -340,6 +347,12 @@ def build_search_stats_block(search_results: List[Dict[str, Any]]) -> str:
         f"单日最高：{peak_desc}",
         f"按日分布：{day_desc}",
     ]
+    if sentiment_counts:
+        dist = "、".join(f"{k} {v}条({v/total*100:.1f}%)"
+                        for k, v in sorted(sentiment_counts.items(), key=lambda kv: -kv[1]))
+        parts.append(f"情感分布（模型标注）：{dist}")
+    else:
+        parts.append("情感分布：本批数据未做情感标注，**不得自行判定正负面或编造百分比**")
     if engagement_total:
         parts.append(f"平均每条互动量：{round(engagement_total / total, 1)} 次")
     if len(by_day) > 1:
@@ -406,6 +419,11 @@ def format_search_results_for_prompt(search_results: List[Dict[str, Any]],
         source_keyword = result.get('source_keyword')
         if source_keyword:
             meta_parts.append(f"来源关键词={source_keyword}")
+        sentiment = result.get('sentiment_label') or result.get('sentiment')
+        if sentiment:
+            conf = result.get('sentiment_confidence')
+            conf_txt = f"(置信度{float(conf):.2f})" if conf not in (None, '', 0) else ""
+            meta_parts.append(f"情感={sentiment}{conf_txt}")
 
         if meta_parts:
             meta_line = "【真实数据】" + " | ".join(meta_parts)

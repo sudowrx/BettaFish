@@ -49,6 +49,8 @@ class QueryResult:
     source_keyword: Optional[str] = None
     hotness_score: float = 0.0
     source_table: str = ""
+    sentiment_label: Optional[str] = None
+    sentiment_confidence: Optional[float] = None
 
 @dataclass
 class DBResponse:
@@ -173,6 +175,20 @@ class MediaCrawlerDB:
                     break
         return engagement
 
+    def _extract_sentiment(self, row: Dict[str, Any]) -> tuple:
+        """提取情感标注（若该表已标注）。
+
+        返回 (label, confidence)；未标注时返回 (None, None)。
+        """
+        label = row.get("sentiment_label")
+        if not label:
+            return None, None
+        try:
+            conf = float(row.get("sentiment_confidence")) if row.get("sentiment_confidence") is not None else None
+        except (TypeError, ValueError):
+            conf = None
+        return label, conf
+
     def search_hot_content(
         self,
         time_period: Literal['24h', 'week', 'year'] = 'week',
@@ -234,13 +250,13 @@ class MediaCrawlerDB:
                               "source_keyword, '{tbl}' as tbl, {extra_cols} "
                               "FROM {tbl} WHERE {time_filter}")
 
-            field_subs = {'platform': table.split('_')[0], 'type': content_type, 'title': self._q('title'), 'author': self._q('nickname'), 'url': self._q('video_url'), 'ts': self._q('create_time'), 'formula': formula, 'tbl': self._q(table), 'time_filter': time_filter_sql, 'extra_cols': 'NULL::text as liked_count, NULL::text as comments_count, NULL::text as shared_count'}
-            if table == 'weibo_note': field_subs.update({'title': self._q('content'), 'url': self._q('note_url'), 'ts': self._q('create_date_time'), 'extra_cols': f"({self._q('liked_count')})::text as liked_count, ({self._q('comments_count')})::text as comments_count, ({self._q('shared_count')})::text as shared_count"})
-            elif table == 'xhs_note': field_subs.update({'ts': self._q('time'), 'url': self._q('note_url'), 'extra_cols': f"({self._q('liked_count')})::text as liked_count, ({self._q('comment_count')})::text as comments_count, ({self._q('share_count')})::text as shared_count"})
-            elif table == 'zhihu_content': field_subs.update({'author': self._q('user_nickname'), 'url': self._q('content_url'), 'ts': self._q('created_time'), 'extra_cols': f"({self._q('voteup_count')})::text as liked_count, ({self._q('comment_count')})::text as comments_count, NULL::text as shared_count"})
-            elif table == 'douyin_aweme': field_subs.update({'url': self._q('aweme_url'), 'extra_cols': f"({self._q('liked_count')})::text as liked_count, ({self._q('comment_count')})::text as comments_count, ({self._q('share_count')})::text as shared_count"})
-            elif table == 'bilibili_video': field_subs.update({'extra_cols': f"({self._q('liked_count')})::text as liked_count, ({self._q('video_comment')})::text as comments_count, ({self._q('video_share_count')})::text as shared_count"})
-            elif table == 'kuaishou_video': field_subs.update({'extra_cols': f"({self._q('liked_count')})::text as liked_count, NULL::text as comments_count, NULL::text as shared_count"})
+            field_subs = {'platform': table.split('_')[0], 'type': content_type, 'title': self._q('title'), 'author': self._q('nickname'), 'url': self._q('video_url'), 'ts': self._q('create_time'), 'formula': formula, 'tbl': self._q(table), 'time_filter': time_filter_sql, 'extra_cols': 'NULL::text as liked_count, NULL::text as comments_count, NULL::text as shared_count, NULL::text as sentiment_label, NULL::text as sentiment_confidence'}
+            if table == 'weibo_note': field_subs.update({'title': self._q('content'), 'url': self._q('note_url'), 'ts': self._q('create_date_time'), 'extra_cols': f"({self._q('liked_count')})::text as liked_count, ({self._q('comments_count')})::text as comments_count, ({self._q('shared_count')})::text as shared_count, {self._q('sentiment_label')}::text as sentiment_label, {self._q('sentiment_confidence')}::text as sentiment_confidence"})
+            elif table == 'xhs_note': field_subs.update({'ts': self._q('time'), 'url': self._q('note_url'), 'extra_cols': f"({self._q('liked_count')})::text as liked_count, ({self._q('comment_count')})::text as comments_count, ({self._q('share_count')})::text as shared_count, NULL::text as sentiment_label, NULL::text as sentiment_confidence"})
+            elif table == 'zhihu_content': field_subs.update({'author': self._q('user_nickname'), 'url': self._q('content_url'), 'ts': self._q('created_time'), 'extra_cols': f"({self._q('voteup_count')})::text as liked_count, ({self._q('comment_count')})::text as comments_count, NULL::text as shared_count, NULL::text as sentiment_label, NULL::text as sentiment_confidence"})
+            elif table == 'douyin_aweme': field_subs.update({'url': self._q('aweme_url'), 'extra_cols': f"({self._q('liked_count')})::text as liked_count, ({self._q('comment_count')})::text as comments_count, ({self._q('share_count')})::text as shared_count, NULL::text as sentiment_label, NULL::text as sentiment_confidence"})
+            elif table == 'bilibili_video': field_subs.update({'extra_cols': f"({self._q('liked_count')})::text as liked_count, ({self._q('video_comment')})::text as comments_count, ({self._q('video_share_count')})::text as shared_count, NULL::text as sentiment_label, NULL::text as sentiment_confidence"})
+            elif table == 'kuaishou_video': field_subs.update({'extra_cols': f"({self._q('liked_count')})::text as liked_count, NULL::text as comments_count, NULL::text as shared_count, NULL::text as sentiment_label, NULL::text as sentiment_confidence"})
 
             all_queries.append(query_template.format(**field_subs))
             params[pname] = time_filter_param
@@ -253,7 +269,7 @@ class MediaCrawlerDB:
             final_query = f"({' ) UNION ALL ( '.join(all_queries)}) ORDER BY hotness_score DESC LIMIT :hot_limit"
         raw_results = self._execute_query(final_query, params)
 
-        formatted_results = [QueryResult(platform=r['p'], content_type=r['t'], title_or_content=r['title'], author_nickname=r.get('author'), url=r['url'], publish_time=self._to_datetime(r['ts']), engagement=self._extract_engagement(r), hotness_score=r.get('hotness_score', 0.0), source_keyword=r.get('source_keyword'), source_table=r['tbl']) for r in raw_results]
+        formatted_results = [QueryResult(platform=r['p'], content_type=r['t'], title_or_content=r['title'], author_nickname=r.get('author'), url=r['url'], publish_time=self._to_datetime(r['ts']), engagement=self._extract_engagement(r), hotness_score=r.get('hotness_score', 0.0), source_keyword=r.get('source_keyword'), source_table=r['tbl'], sentiment_label=r.get('sentiment_label'), sentiment_confidence=float(r['sentiment_confidence']) if r.get('sentiment_confidence') else None) for r in raw_results]
         return DBResponse("search_hot_content", params_for_log, results=formatted_results, results_count=len(formatted_results))    
 
     def _wrap_query_field_with_dialect(self, field: str) -> str:
@@ -351,6 +367,7 @@ class MediaCrawlerDB:
             query = f'SELECT * FROM {self._wrap_query_field_with_dialect(table)} WHERE {where_clause} ORDER BY id DESC LIMIT :limit'
             raw_results = self._execute_query(query, param_dict)
             for row in raw_results:
+                _slabel, _sconf = self._extract_sentiment(row)
                 content = (row.get('title') or row.get('content') or row.get('desc') or row.get('content_text', ''))
                 time_key = row.get('create_time') or row.get('time') or row.get('created_time') or row.get('publish_time') or row.get('crawl_date')
                 all_results.append(QueryResult(
@@ -361,7 +378,9 @@ class MediaCrawlerDB:
                     publish_time=self._to_datetime(time_key),
                     engagement=self._extract_engagement(row),
                     source_keyword=row.get('source_keyword'),
-                    source_table=table
+                    source_table=table,
+                    sentiment_label=_slabel,
+                    sentiment_confidence=_sconf
                 ))
         return DBResponse("search_topic_globally", params_for_log, results=all_results, results_count=len(all_results))
 
@@ -406,6 +425,7 @@ class MediaCrawlerDB:
             query = f'SELECT * FROM {self._wrap_query_field_with_dialect(table)} WHERE {where_clause} ORDER BY id DESC LIMIT :limit'
             raw_results = self._execute_query(query, param_dict)
             for row in raw_results:
+                _slabel, _sconf = self._extract_sentiment(row)
                 content = (row.get('title') or row.get('content') or row.get('desc') or row.get('content_text', ''))
                 time_key = row.get('create_time') or row.get('time') or row.get('created_time') or row.get('publish_time') or row.get('crawl_date')
                 all_results.append(QueryResult(
@@ -416,7 +436,9 @@ class MediaCrawlerDB:
                     publish_time=self._to_datetime(time_key),
                     engagement=self._extract_engagement(row),
                     source_keyword=row.get('source_keyword'),
-                    source_table=table
+                    source_table=table,
+                    sentiment_label=_slabel,
+                    sentiment_confidence=_sconf
                 ))
         return DBResponse("search_topic_by_date", params_for_log, results=all_results, results_count=len(all_results))
         
@@ -543,9 +565,10 @@ class MediaCrawlerDB:
 
             raw_results = self._execute_query(query, params)
             for row in raw_results:
+                _slabel, _sconf = self._extract_sentiment(row)
                 content = (row.get('title') or row.get('content') or row.get('desc') or row.get('content_text', ''))
                 time_key = config.get('time_col') and row.get(config.get('time_col'))
-                all_results.append(QueryResult(platform=platform, content_type=config['type'], title_or_content=content if content else '', author_nickname=row.get('nickname') or row.get('user_nickname'), url=row.get('video_url') or row.get('note_url') or row.get('content_url') or row.get('url') or row.get('aweme_url'), publish_time=self._to_datetime(time_key), engagement=self._extract_engagement(row), source_keyword=row.get('source_keyword'), source_table=table))
+                all_results.append(QueryResult(platform=platform, content_type=config['type'], title_or_content=content if content else '', author_nickname=row.get('nickname') or row.get('user_nickname'), url=row.get('video_url') or row.get('note_url') or row.get('content_url') or row.get('url') or row.get('aweme_url'), publish_time=self._to_datetime(time_key), engagement=self._extract_engagement(row), source_keyword=row.get('source_keyword'), source_table=table, sentiment_label=_slabel, sentiment_confidence=_sconf))
         
         return DBResponse("search_topic_on_platform", params_for_log, results=all_results, results_count=len(all_results))
 
