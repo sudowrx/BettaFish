@@ -364,3 +364,8 @@ CLAUDE.md
 findings.md
 progress.md
 task_plan.md
+
+# 环境配置备份（含真实密钥，禁止提交）
+.env.bak-*
+.env.local*
+.env.*.bak
