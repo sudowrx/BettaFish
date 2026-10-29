@@ -9,7 +9,8 @@ from .text_processing import (
     remove_reasoning_from_output,
     extract_clean_response,
     update_state_with_search_results,
-    format_search_results_for_prompt
+    format_search_results_for_prompt,
+    build_search_stats_block
 )
 
 from .config import Settings
@@ -21,5 +22,6 @@ __all__ = [
     "extract_clean_response",
     "update_state_with_search_results",
     "format_search_results_for_prompt",
+    "build_search_stats_block",
     "Settings",
 ]

@@ -285,6 +285,70 @@ def truncate_content(content: str, max_length: int = 20000) -> str:
         return truncated + "..."
 
 
+def build_search_stats_block(search_results: List[Dict[str, Any]]) -> str:
+    """
+    预先算好本次检索的真实统计量，供 LLM 直接引用。
+
+    不做这一步的话，LLM 会拿着几十条明细自己去加总/推算比例，
+    算术错误随之而来（实测把 8966 写成"超1.2万"、把 6.8 倍写成"68倍"）。
+
+    Args:
+        search_results: 搜索结果列表
+
+    Returns:
+        统计摘要文本；无数据时返回提示语
+    """
+    if not search_results:
+        return "【本次检索统计】未命中任何数据"
+
+    total = len(search_results)
+
+    # 平台分布
+    platforms: Dict[str, int] = {}
+    for r in search_results:
+        p = r.get('platform') or r.get('source_table') or '未知'
+        platforms[p] = platforms.get(p, 0) + 1
+
+    # 互动数合计
+    likes = comments = shares = 0
+    for r in search_results:
+        eng = r.get('engagement') or {}
+        if isinstance(eng, dict):
+            likes += int(eng.get('likes') or 0)
+            comments += int(eng.get('comments') or 0)
+            shares += int(eng.get('shares') or 0)
+    engagement_total = likes + comments + shares
+
+    # 时间分布
+    by_day: Dict[str, int] = {}
+    for r in search_results:
+        t = r.get('published_date') or r.get('publish_time')
+        if not t:
+            continue
+        day = str(t)[:10]
+        by_day[day] = by_day.get(day, 0) + 1
+
+    day_desc = "、".join(f"{d} {c}条" for d, c in sorted(by_day.items())) if by_day else "未提供"
+
+    peak_day = max(by_day.items(), key=lambda kv: kv[1]) if by_day else None
+    peak_desc = f"{peak_day[0]}（{peak_day[1]}条）" if peak_day else "未提供"
+
+    parts = [
+        f"命中总条数：{total}条",
+        f"平台分布：{'、'.join(f'{k} {v}条' for k, v in sorted(platforms.items(), key=lambda kv: -kv[1]))}",
+        f"互动量合计：点赞 {likes} + 评论 {comments} + 转发 {shares} = 总计 {engagement_total} 次",
+        f"单日最高：{peak_desc}",
+        f"按日分布：{day_desc}",
+    ]
+    if engagement_total:
+        parts.append(f"平均每条互动量：{round(engagement_total / total, 1)} 次")
+    if len(by_day) > 1:
+        vals = list(by_day.values())
+        parts.append(f"日均条数：{round(total / len(by_day), 1)} 条")
+
+    return "【本次检索统计】\n" + "\n".join(f"- {p}" for p in parts)
+
+
 def format_search_results_for_prompt(search_results: List[Dict[str, Any]],
                                    max_length: int = 20000) -> List[str]:
     """
@@ -305,6 +369,10 @@ def format_search_results_for_prompt(search_results: List[Dict[str, Any]],
         return ["【本次检索未命中任何相关内容。以下内容没有任何真实数据支撑，请如实说明未检索到相关内容，不要编造任何数字、事件或用户引语。】"]
 
     formatted_results = []
+
+    # 统计摘要放在最前面：让 LLM 直接引用预先算好的数字，
+    # 而不是自己拿着几十条明细去加总和推算比例（那一步会出错）。
+    formatted_results.append(build_search_stats_block(search_results))
 
     for result in search_results:
         content = result.get('content', '')
@@ -345,7 +413,9 @@ def format_search_results_for_prompt(search_results: List[Dict[str, Any]],
         else:
             formatted_results.append(truncated_content)
 
-    if not formatted_results:
-        return ["【本次检索命中的结果内容为空。以下内容没有任何真实数据支撑，请如实说明未检索到相关内容，不要编造任何数字、事件或用户引语。】"]
+    # 正文条数为 0（只有统计块）时，如实告诉 LLM 没有可引用的正文
+    if len(formatted_results) <= 1:
+        return [build_search_stats_block(search_results),
+                "【本次检索命中的结果内容为空。以下内容没有任何真实数据支撑，请如实说明未检索到相关内容，不要编造任何数字、事件或用户引语。】"]
 
     return formatted_results

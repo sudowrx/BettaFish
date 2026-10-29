@@ -285,15 +285,83 @@ def truncate_content(content: str, max_length: int = 20000) -> str:
         return truncated + "..."
 
 
-def format_search_results_for_prompt(search_results: List[Dict[str, Any]], 
+def build_search_stats_block(search_results: List[Dict[str, Any]]) -> str:
+    """
+    预先算好本次检索的真实统计量，供 LLM 直接引用。
+
+    不做这一步的话，LLM 会拿着几十条明细自己去加总/推算比例，
+    算术错误随之而来（实测把 8966 写成"超1.2万"、把 6.8 倍写成"68倍"）。
+
+    Args:
+        search_results: 搜索结果列表
+
+    Returns:
+        统计摘要文本；无数据时返回提示语
+    """
+    if not search_results:
+        return "【本次检索统计】未命中任何数据"
+
+    total = len(search_results)
+
+    # 平台分布
+    platforms: Dict[str, int] = {}
+    for r in search_results:
+        p = r.get('platform') or r.get('source_table') or '未知'
+        platforms[p] = platforms.get(p, 0) + 1
+
+    # 互动数合计
+    likes = comments = shares = 0
+    for r in search_results:
+        eng = r.get('engagement') or {}
+        if isinstance(eng, dict):
+            likes += int(eng.get('likes') or 0)
+            comments += int(eng.get('comments') or 0)
+            shares += int(eng.get('shares') or 0)
+    engagement_total = likes + comments + shares
+
+    # 时间分布
+    by_day: Dict[str, int] = {}
+    for r in search_results:
+        t = r.get('published_date') or r.get('publish_time')
+        if not t:
+            continue
+        day = str(t)[:10]
+        by_day[day] = by_day.get(day, 0) + 1
+
+    day_desc = "、".join(f"{d} {c}条" for d, c in sorted(by_day.items())) if by_day else "未提供"
+
+    peak_day = max(by_day.items(), key=lambda kv: kv[1]) if by_day else None
+    peak_desc = f"{peak_day[0]}（{peak_day[1]}条）" if peak_day else "未提供"
+
+    parts = [
+        f"命中总条数：{total}条",
+        f"平台分布：{'、'.join(f'{k} {v}条' for k, v in sorted(platforms.items(), key=lambda kv: -kv[1]))}",
+        f"互动量合计：点赞 {likes} + 评论 {comments} + 转发 {shares} = 总计 {engagement_total} 次",
+        f"单日最高：{peak_desc}",
+        f"按日分布：{day_desc}",
+    ]
+    if engagement_total:
+        parts.append(f"平均每条互动量：{round(engagement_total / total, 1)} 次")
+    if len(by_day) > 1:
+        vals = list(by_day.values())
+        parts.append(f"日均条数：{round(total / len(by_day), 1)} 条")
+
+    return "【本次检索统计】\n" + "\n".join(f"- {p}" for p in parts)
+
+
+
+def format_search_results_for_prompt(search_results: List[Dict[str, Any]],
                                    max_length: int = 20000) -> List[str]:
     """
     格式化搜索结果用于提示词
-    
+
+    除正文外，必须一并带上互动数/昵称/时间/来源表等结构化字段。
+    否则 LLM 看不到真实数值，只能靠编造填充字数——这是报告数字失真的根因。
+
     Args:
         search_results: 搜索结果列表
         max_length: 每个结果的最大长度
-        
+
     Returns:
         格式化后的内容列表
     """
@@ -303,13 +371,52 @@ def format_search_results_for_prompt(search_results: List[Dict[str, Any]],
 
     formatted_results = []
 
+    # 统计摘要放在最前面：让 LLM 直接引用预先算好的数字，
+    # 而不是自己拿着几十条明细去加总和推算比例（那一步会出错）。
+    formatted_results.append(build_search_stats_block(search_results))
+
     for result in search_results:
         content = result.get('content', '')
-        if content:
-            truncated_content = truncate_content(content, max_length)
+        if not content:
+            continue
+
+        truncated_content = truncate_content(content, max_length)
+
+        # 收集真实可用的结构化字段，只保留有值的
+        meta_parts = []
+        platform = result.get('platform') or result.get('source_table')
+        if platform:
+            meta_parts.append(f"平台={platform}")
+        nickname = result.get('author') or result.get('author_nickname')
+        if nickname:
+            meta_parts.append(f"作者={nickname}")
+        publish_time = result.get('published_date') or result.get('publish_time')
+        if publish_time:
+            meta_parts.append(f"发布时间={publish_time}")
+        engagement = result.get('engagement') or {}
+        if isinstance(engagement, dict):
+            eng_parts = []
+            # 键名与 MediaCrawlerDB._extract_engagement 的 mapping 对齐
+            for key, label in (('likes', '点赞'), ('comments', '评论'), ('shares', '转发/分享'),
+                               ('views', '播放'), ('favorites', '收藏')):
+                val = engagement.get(key)
+                if val not in (None, '', 0, '0'):
+                    eng_parts.append(f"{label}={val}")
+            if eng_parts:
+                meta_parts.append("互动数(" + ", ".join(eng_parts) + ")")
+        source_keyword = result.get('source_keyword')
+        if source_keyword:
+            meta_parts.append(f"来源关键词={source_keyword}")
+
+        if meta_parts:
+            meta_line = "【真实数据】" + " | ".join(meta_parts)
+            formatted_results.append(f"{meta_line}\n正文：{truncated_content}")
+        else:
             formatted_results.append(truncated_content)
 
-    if not formatted_results:
-        return ["【本次检索命中的结果内容为空。以下内容没有任何真实数据支撑，请如实说明未检索到相关内容，不要编造任何数字、事件或用户引语。】"]
+    # 正文条数为 0（只有统计块）时，如实告诉 LLM 没有可引用的正文
+    if len(formatted_results) <= 1:
+        return [build_search_stats_block(search_results),
+                "【本次检索命中的结果内容为空。以下内容没有任何真实数据支撑，请如实说明未检索到相关内容，不要编造任何数字、事件或用户引语。】"]
 
     return formatted_results
