@@ -75,7 +75,7 @@ class MediaCrawlerDB:
         """
         pass
         
-    def _execute_query(self, query: str, params: tuple = None) -> List[Dict[str, Any]]:
+    def _execute_query(self, query: str, params: Any = None) -> List[Dict[str, Any]]:
         try:
             # 获取或创建event loop
             try:
@@ -108,12 +108,6 @@ class MediaCrawlerDB:
         except (ValueError, TypeError): return None
 
     _table_columns_cache = {}
-    def _get_table_columns(self, table_name: str) -> List[str]:
-        if table_name in self._table_columns_cache: return self._table_columns_cache[table_name]
-        results = self._execute_query(f"SHOW COLUMNS FROM `{table_name}`")
-        columns = [row['Field'] for row in results] if results else []
-        self._table_columns_cache[table_name] = columns
-        return columns
 
     def _extract_engagement(self, row: Dict[str, Any]) -> Dict[str, int]:
         """从数据行中提取并统一互动指标"""
@@ -149,37 +143,63 @@ class MediaCrawlerDB:
         start_time = now - timedelta(days={'24h': 1, 'week': 7}.get(time_period, 365))
 
         # 定义各平台的热度计算SQL片段
+        # 计数类字段在 MediaCrawler 里是 Text（可能有非数字脏值），统一 CAST 成整数
         hotness_formulas = {
-            'bilibili_video': f"(COALESCE(CAST(liked_count AS UNSIGNED), 0) * {self.W_LIKE} + COALESCE(CAST(video_comment AS UNSIGNED), 0) * {self.W_COMMENT} + COALESCE(CAST(video_share_count AS UNSIGNED), 0) * {self.W_SHARE} + COALESCE(CAST(video_favorite_count AS UNSIGNED), 0) * {self.W_SHARE} + COALESCE(CAST(video_coin_count AS UNSIGNED), 0) * {self.W_SHARE} + COALESCE(CAST(video_danmaku AS UNSIGNED), 0) * {self.W_DANMAKU} + COALESCE(CAST(video_play_count AS DECIMAL(20,2)), 0) * {self.W_VIEW})",
-            'douyin_aweme':   f"(COALESCE(CAST(liked_count AS UNSIGNED), 0) * {self.W_LIKE} + COALESCE(CAST(comment_count AS UNSIGNED), 0) * {self.W_COMMENT} + COALESCE(CAST(share_count AS UNSIGNED), 0) * {self.W_SHARE} + COALESCE(CAST(collected_count AS UNSIGNED), 0) * {self.W_SHARE})",
-            'weibo_note':     f"(COALESCE(CAST(liked_count AS UNSIGNED), 0) * {self.W_LIKE} + COALESCE(CAST(comments_count AS UNSIGNED), 0) * {self.W_COMMENT} + COALESCE(CAST(shared_count AS UNSIGNED), 0) * {self.W_SHARE})",
-            'xhs_note':       f"(COALESCE(CAST(liked_count AS UNSIGNED), 0) * {self.W_LIKE} + COALESCE(CAST(comment_count AS UNSIGNED), 0) * {self.W_COMMENT} + COALESCE(CAST(share_count AS UNSIGNED), 0) * {self.W_SHARE} + COALESCE(CAST(collected_count AS UNSIGNED), 0) * {self.W_SHARE})",
-            'kuaishou_video': f"(COALESCE(CAST(liked_count AS UNSIGNED), 0) * {self.W_LIKE} + COALESCE(CAST(viewd_count AS DECIMAL(20,2)), 0) * {self.W_VIEW})",
-            'zhihu_content':  f"(COALESCE(CAST(voteup_count AS UNSIGNED), 0) * {self.W_LIKE} + COALESCE(CAST(comment_count AS UNSIGNED), 0) * {self.W_COMMENT})",
+            'bilibili_video': f"(COALESCE({self._cast_int('liked_count')}, 0) * {self.W_LIKE} + COALESCE({self._cast_int('video_comment')}, 0) * {self.W_COMMENT} + COALESCE({self._cast_int('video_share_count')}, 0) * {self.W_SHARE} + COALESCE({self._cast_int('video_favorite_count')}, 0) * {self.W_SHARE} + COALESCE({self._cast_int('video_coin_count')}, 0) * {self.W_SHARE} + COALESCE({self._cast_int('video_danmaku')}, 0) * {self.W_DANMAKU} + COALESCE({self._cast_float('video_play_count')}, 0) * {self.W_VIEW})",
+            'douyin_aweme':   f"(COALESCE({self._cast_int('liked_count')}, 0) * {self.W_LIKE} + COALESCE({self._cast_int('comment_count')}, 0) * {self.W_COMMENT} + COALESCE({self._cast_int('share_count')}, 0) * {self.W_SHARE} + COALESCE({self._cast_int('collected_count')}, 0) * {self.W_SHARE})",
+            'weibo_note':     f"(COALESCE({self._cast_int('liked_count')}, 0) * {self.W_LIKE} + COALESCE({self._cast_int('comments_count')}, 0) * {self.W_COMMENT} + COALESCE({self._cast_int('shared_count')}, 0) * {self.W_SHARE})",
+            'xhs_note':       f"(COALESCE({self._cast_int('liked_count')}, 0) * {self.W_LIKE} + COALESCE({self._cast_int('comment_count')}, 0) * {self.W_COMMENT} + COALESCE({self._cast_int('share_count')}, 0) * {self.W_SHARE} + COALESCE({self._cast_int('collected_count')}, 0) * {self.W_SHARE})",
+            'kuaishou_video': f"(COALESCE({self._cast_float('viewd_count')}, 0) * {self.W_VIEW})",
+            'zhihu_content':  f"(COALESCE({self._cast_int('voteup_count')}, 0) * {self.W_LIKE} + COALESCE({self._cast_int('comment_count')}, 0) * {self.W_COMMENT})",
         }
 
-        all_queries, params = [], []
-        for table, formula in hotness_formulas.items():
-            time_filter_sql, time_filter_param = "", None
-            if table == 'weibo_note': time_filter_sql, time_filter_param = "`create_date_time` >= %s", start_time.strftime('%Y-%m-%d %H:%M:%S')
-            elif table in ['kuaishou_video', 'xhs_note', 'douyin_aweme']: time_col = 'time' if table == 'xhs_note' else 'create_time'; time_filter_sql, time_filter_param = f"`{time_col}` >= %s", str(int(start_time.timestamp() * 1000))
-            elif table == 'zhihu_content': time_filter_sql, time_filter_param = "CAST(`created_time` AS UNSIGNED) >= %s", str(int(start_time.timestamp()))
-            else: time_filter_sql, time_filter_param = "`create_time` >= %s", str(int(start_time.timestamp()))
+        all_queries, params = [], {}
+        for idx, (table, formula) in enumerate(hotness_formulas.items()):
+            pname = f"tf_{idx}"
+            if table == 'weibo_note':
+                time_filter_sql = f"{self._q('create_date_time')} >= :{pname}"
+                time_filter_param = start_time.strftime('%Y-%m-%d %H:%M:%S')
+            elif table in ['kuaishou_video', 'xhs_note', 'douyin_aweme']:
+                time_col = 'time' if table == 'xhs_note' else 'create_time'
+                time_filter_sql = f"{self._q(time_col)} >= :{pname}"
+                time_filter_param = int(start_time.timestamp() * 1000)
+            elif table == 'zhihu_content':
+                time_filter_sql = f"{self._cast_int('created_time')} >= :{pname}"
+                time_filter_param = int(start_time.timestamp())
+            else:
+                time_filter_sql = f"{self._q('create_time')} >= :{pname}"
+                time_filter_param = int(start_time.timestamp())
 
             content_type = 'note' if table in ['weibo_note', 'xhs_note'] else 'content' if table == 'zhihu_content' else 'video'
-            query_template = "SELECT '{platform}' as p, '{type}' as t, {title} as title, {author} as author, {url} as url, {ts} as ts, {formula} as hotness_score, source_keyword, '{tbl}' as tbl FROM `{tbl}` WHERE {time_filter}"
-            
-            field_subs = {'platform': table.split('_')[0], 'type': content_type, 'title': 'title', 'author': 'nickname', 'url': 'video_url', 'ts': 'create_time', 'formula': formula, 'tbl': table, 'time_filter': time_filter_sql}
-            if table == 'weibo_note': field_subs.update({'title': 'content', 'url': 'note_url', 'ts': 'create_date_time'})
-            elif table == 'xhs_note': field_subs.update({'ts': 'time', 'url': 'note_url'})
-            elif table == 'zhihu_content': field_subs.update({'author': 'user_nickname', 'url': 'content_url', 'ts': 'created_time'})
-            elif table == 'douyin_aweme': field_subs.update({'url': 'aweme_url'})
+            # UNION 要求各分支列类型一致：ts 在 weibo/zhihu 是 varchar，
+            # 在其它平台是 bigint；hotness_score 里既有整数也有浮点。
+            # 统一 ::text / ::double precision 后再 UNION。
+            # 额外把各表的互动计数字段一起 SELECT 出来，否则
+            # _extract_engagement 取不到 likes/comments，UI 上互动数全是空的。
+            query_template = ("SELECT '{platform}' as p, '{type}' as t, {title} as title, "
+                              "{author} as author, {url} as url, ({ts})::text as ts, "
+                              "({formula})::double precision as hotness_score, "
+                              "source_keyword, '{tbl}' as tbl, {extra_cols} "
+                              "FROM {tbl} WHERE {time_filter}")
+
+            field_subs = {'platform': table.split('_')[0], 'type': content_type, 'title': self._q('title'), 'author': self._q('nickname'), 'url': self._q('video_url'), 'ts': self._q('create_time'), 'formula': formula, 'tbl': self._q(table), 'time_filter': time_filter_sql, 'extra_cols': 'NULL::text as liked_count, NULL::text as comments_count, NULL::text as shared_count'}
+            if table == 'weibo_note': field_subs.update({'title': self._q('content'), 'url': self._q('note_url'), 'ts': self._q('create_date_time'), 'extra_cols': f"({self._q('liked_count')})::text as liked_count, ({self._q('comments_count')})::text as comments_count, ({self._q('shared_count')})::text as shared_count"})
+            elif table == 'xhs_note': field_subs.update({'ts': self._q('time'), 'url': self._q('note_url'), 'extra_cols': f"({self._q('liked_count')})::text as liked_count, ({self._q('comment_count')})::text as comments_count, ({self._q('share_count')})::text as shared_count"})
+            elif table == 'zhihu_content': field_subs.update({'author': self._q('user_nickname'), 'url': self._q('content_url'), 'ts': self._q('created_time'), 'extra_cols': f"({self._q('voteup_count')})::text as liked_count, ({self._q('comment_count')})::text as comments_count, NULL::text as shared_count"})
+            elif table == 'douyin_aweme': field_subs.update({'url': self._q('aweme_url'), 'extra_cols': f"({self._q('liked_count')})::text as liked_count, ({self._q('comment_count')})::text as comments_count, ({self._q('share_count')})::text as shared_count"})
+            elif table == 'bilibili_video': field_subs.update({'extra_cols': f"({self._q('liked_count')})::text as liked_count, ({self._q('video_comment')})::text as comments_count, ({self._q('video_share_count')})::text as shared_count"})
+            elif table == 'kuaishou_video': field_subs.update({'extra_cols': f"({self._q('liked_count')})::text as liked_count, NULL::text as comments_count, NULL::text as shared_count"})
 
             all_queries.append(query_template.format(**field_subs))
-            params.append(time_filter_param)
-        
-        final_query = f"({' ) UNION ALL ( '.join(all_queries)}) ORDER BY hotness_score DESC LIMIT %s"
-        raw_results = self._execute_query(final_query, tuple(params) + (limit,))
+            params[pname] = time_filter_param
+
+        params['hot_limit'] = int(limit)
+        # PG 不允许 UNION 后面直接跟 ORDER BY，要包一层子查询
+        if self._is_postgres:
+            final_query = f"SELECT * FROM ({' UNION ALL '.join(all_queries)}) AS hot_content ORDER BY hotness_score DESC LIMIT :hot_limit"
+        else:
+            final_query = f"({' ) UNION ALL ( '.join(all_queries)}) ORDER BY hotness_score DESC LIMIT :hot_limit"
+        raw_results = self._execute_query(final_query, params)
 
         formatted_results = [QueryResult(platform=r['p'], content_type=r['t'], title_or_content=r['title'], author_nickname=r.get('author'), url=r['url'], publish_time=self._to_datetime(r['ts']), engagement=self._extract_engagement(r), hotness_score=r.get('hotness_score', 0.0), source_keyword=r.get('source_keyword'), source_table=r['tbl']) for r in raw_results]
         return DBResponse("search_hot_content", params_for_log, results=formatted_results, results_count=len(formatted_results))    
@@ -189,6 +209,66 @@ class MediaCrawlerDB:
         if settings.DB_DIALECT == 'postgresql':
             return f'"{field}"'
         return f'`{field}`'
+
+    # ---------- PostgreSQL 方言适配 ----------
+    # 下面这些工具最初是按 MySQL 方言写的（反引号标识符、%s 占位符、
+    # CAST(x AS UNSIGNED)、SHOW COLUMNS、UNION ALL ... ORDER BY）。
+    # BettaFish 已经切到 PostgreSQL，这些写法全部会报语法错误。
+    # 这里的做法：统一改写成两种方言都认的写法 —— 标识符用标准双引号，
+    # 数值转换用 CAST(x AS BIGINT)，占位符统一用命名参数 (:name)，
+    # 列信息用 information_schema 查询。
+    @property
+    def _is_postgres(self) -> bool:
+        return (settings.DB_DIALECT or "mysql").lower() in ("postgresql", "postgres")
+
+    def _q(self, field: str) -> str:
+        """标识符引用（两种方言通用）"""
+        return f'"{field}"'
+
+    def _cast_int(self, col: str) -> str:
+        """把计数字段转成整数（两种方言通用）
+
+        MediaCrawler 把点赞/评论数存成 Text，实际值可能是 ''、'1.2万'、
+        '赞' 这类脏数据；但部分表（bilibili_video.liked_count、
+        zhihu_content.voteup_count）的列类型本身是 integer。
+        SUBSTRING 只接受 text，所以先 ::text 统一，再正则抽出开头的数字
+        部分，最后转成整数。
+        """
+        if self._is_postgres:
+            return (
+                f"CAST(NULLIF(SUBSTRING(({self._q(col)})::text FROM '^[-0-9]*'), '') AS BIGINT)"
+            )
+        return f"CAST({self._q(col)} AS UNSIGNED)"
+
+    def _cast_float(self, col: str) -> str:
+        if self._is_postgres:
+            return (
+                f"CAST(NULLIF(SUBSTRING(({self._q(col)})::text FROM '^[-0-9]*[.]?[0-9]*'), '') AS DOUBLE PRECISION)"
+            )
+        return f"CAST({self._q(col)} AS DECIMAL(20,2))"
+
+    def _limit_clause(self, limit: int, offset: int = 0) -> str:
+        """LIMIT 写法（两种方言通用）"""
+        if self._is_postgres:
+            return f"LIMIT {int(limit)} OFFSET {int(offset)}"
+        return f"LIMIT {int(limit)} OFFSET {int(offset)}"
+
+    def _get_table_columns(self, table_name: str) -> List[str]:
+        """读取表列名（MySQL 用 SHOW COLUMNS，PG 用 information_schema）"""
+        if table_name in self._table_columns_cache: return self._table_columns_cache[table_name]
+        if self._is_postgres:
+            query = (
+                "SELECT column_name FROM information_schema.columns "
+                f"WHERE table_schema = 'public' AND table_name = :tname "
+                "ORDER BY ordinal_position"
+            )
+            results = self._execute_query(query, {"tname": table_name})
+            columns = [r["column_name"] for r in results] if results else []
+        else:
+            results = self._execute_query(f"SHOW COLUMNS FROM `{table_name}`")
+            columns = [row['Field'] for row in results] if results else []
+        self._table_columns_cache[table_name] = columns
+        return columns
 
     def search_topic_globally(self, topic: str, limit_per_table: int = 100) -> DBResponse:
         """
@@ -304,22 +384,36 @@ class MediaCrawlerDB:
         
         search_term = f"%{topic}%"
         comment_tables = ['bilibili_video_comment', 'douyin_aweme_comment', 'kuaishou_video_comment', 'weibo_note_comment', 'xhs_note_comment', 'zhihu_comment', 'tieba_comment']
-        
-        all_queries = []
-        for table in comment_tables:
+
+        all_queries, params = [], {}
+        for idx, table in enumerate(comment_tables):
             cols = self._get_table_columns(table)
             author_col = 'user_nickname' if 'user_nickname' in cols else 'nickname'
             like_col = 'comment_like_count' if 'comment_like_count' in cols else 'like_count' if 'like_count' in cols else None
             time_col = 'publish_time' if 'publish_time' in cols else 'create_date_time' if 'create_date_time' in cols else 'create_time'
-            like_select = f"`{like_col}` as likes" if like_col else "'0' as likes"
-            
-            query = (f"SELECT '{table.split('_')[0]}' as platform, `content`, `{author_col}` as author, "
-                     f"`{time_col}` as ts, {like_select}, '{table}' as source_table "
-                     f"FROM `{table}` WHERE `content` LIKE %s")
-            all_queries.append(query)
+            # UNION 要求所有分支的列类型一致，否则 PG 报
+            # "UNION types text and integer cannot be matched"。
+            # likes 各表有 text / integer 两种，统一 CAST 成 bigint；
+            # ts 各表有 bigint / varchar 两种，统一 CAST 成 text。
+            if like_col:
+                like_select = f"{self._cast_int(like_col)} as likes"
+            else:
+                like_select = "0 as likes"
+            ts_select = f"({self._q(time_col)})::text as ts"
 
-        final_query = f"({' ) UNION ALL ( '.join(all_queries)}) ORDER BY ts DESC LIMIT %s"
-        params = (search_term,) * len(comment_tables) + (limit,)
+            pname = f"cm_{idx}"
+            query = (f"SELECT '{table.split('_')[0]}' as platform, {self._q('content')}, "
+                     f"{self._q(author_col)} as author, {ts_select}, {like_select}, "
+                     f"'{table}' as source_table "
+                     f"FROM {self._q(table)} WHERE {self._q('content')} LIKE :{pname}")
+            all_queries.append(query)
+            params[pname] = search_term
+
+        params['cm_limit'] = int(limit)
+        if self._is_postgres:
+            final_query = f"SELECT * FROM ({' UNION ALL '.join(all_queries)}) AS comments ORDER BY ts DESC LIMIT :cm_limit"
+        else:
+            final_query = f"({' ) UNION ALL ( '.join(all_queries)}) ORDER BY ts DESC LIMIT :cm_limit"
         raw_results = self._execute_query(final_query, params)
         
         formatted = [QueryResult(platform=r['platform'], content_type='comment', title_or_content=r['content'], author_nickname=r['author'], publish_time=self._to_datetime(r['ts']), engagement={'likes': int(r['likes']) if str(r['likes']).isdigit() else 0}, source_table=r['source_table']) for r in raw_results]
@@ -366,29 +460,36 @@ class MediaCrawlerDB:
         else:
             start_dt, end_dt = None, None
 
-        for config in platform_configs:
+        for idx, config in enumerate(platform_configs):
             table = config['table']
-            topic_clause = " OR ".join([f"`{field}` LIKE %s" for field in config['fields']])
-            query = f"SELECT * FROM `{table}` WHERE {topic_clause}"
-            params = [search_term] * len(config['fields'])
+            pname = f"tp_{idx}"
+            topic_clause = " OR ".join([f"{self._q(field)} LIKE :{pname}" for field in config['fields']])
+            query = f"SELECT * FROM {self._q(table)} WHERE {topic_clause}"
+            params: Dict[str, Any] = {pname: search_term}
 
             if start_dt and end_dt and 'time_col' in config:
                 time_col, time_type = config['time_col'], config['time_type']
-                if time_type == 'sec': t_params = (int(start_dt.timestamp()), int(end_dt.timestamp()))
-                elif time_type == 'ms': t_params = (int(start_dt.timestamp() * 1000), int(end_dt.timestamp() * 1000))
-                elif time_type in ['str', 'date_str']: t_params = (start_dt.strftime('%Y-%m-%d'), end_dt.strftime('%Y-%m-%d'))
-                else: t_params = (str(int(start_dt.timestamp())), str(int(end_dt.timestamp())))
-                
-                t_clause = f"`{time_col}` >= %s AND `{time_col}` < %s"
-                if table == 'zhihu_content': t_clause = f"CAST(`{time_col}` AS UNSIGNED) >= %s AND CAST(`{time_col}` AS UNSIGNED) < %s"
-                
+                tstart, tend = f"t_{idx}_s", f"t_{idx}_e"
+                if time_type == 'sec':
+                    params[tstart], params[tend] = int(start_dt.timestamp()), int(end_dt.timestamp())
+                elif time_type == 'ms':
+                    params[tstart], params[tend] = int(start_dt.timestamp() * 1000), int(end_dt.timestamp() * 1000)
+                elif time_type in ['str', 'date_str']:
+                    params[tstart], params[tend] = start_dt.strftime('%Y-%m-%d'), end_dt.strftime('%Y-%m-%d')
+                else:
+                    params[tstart], params[tend] = str(int(start_dt.timestamp())), str(int(end_dt.timestamp()))
+
+                if table == 'zhihu_content':
+                    t_clause = f"{self._cast_int(time_col)} >= :{tstart} AND {self._cast_int(time_col)} < :{tend}"
+                else:
+                    t_clause = f"{self._q(time_col)} >= :{tstart} AND {self._q(time_col)} < :{tend}"
+
                 query += f" AND ({t_clause})"
-                params.extend(t_params)
 
-            query += f" ORDER BY id DESC LIMIT %s"
-            params.append(limit)
+            query += f" ORDER BY id DESC LIMIT :tp_limit_{idx}"
+            params[f"tp_limit_{idx}"] = int(limit)
 
-            raw_results = self._execute_query(query, tuple(params))
+            raw_results = self._execute_query(query, params)
             for row in raw_results:
                 content = (row.get('title') or row.get('content') or row.get('desc') or row.get('content_text', ''))
                 time_key = config.get('time_col') and row.get(config.get('time_col'))

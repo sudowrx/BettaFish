@@ -95,6 +95,16 @@ class AnspireResponse:
     webpages: List[WebpageResult] = field(default_factory=list)
 
 
+@dataclass
+class TavilyResponse:
+    """封装 Tavily API 的完整返回结果，以便在工具间传递"""
+    query: str
+    conversation_id: Optional[str] = None
+    score: Optional[float] = None
+    answer: Optional[str] = None
+    webpages: List[WebpageResult] = field(default_factory=list)
+
+
 # --- 2. 核心客户端与专用工具集 ---
 
 class BochaMultimodalSearch:
@@ -368,9 +378,111 @@ class AnspireAISearch:
                                      ToTime=to_time.strftime("%Y-%m-%d %H:%M:%S"))
 
 
+class TavilySearch:
+    """
+    Tavily AI Search 客户端（对标 AnspireAISearch / BochaMultimodalSearch 的接口）
+
+    申请地址：https://tavily.com/
+    免费版每月 1000 次调用
+    """
+
+    TAVILY_BASE_URL = os.environ.get("TAVILY_BASE_URL", "https://api.tavily.com")
+
+    def __init__(self, api_key: Optional[str] = None):
+        """
+        初始化客户端。
+        Args:
+            api_key: Tavily API密钥，若不提供则从环境变量 TAVILY_API_KEY 读取。
+        """
+        if api_key is None:
+            api_key = settings.TAVILY_API_KEY
+            if not api_key:
+                raise ValueError("Tavily API Key未找到！请设置 TAVILY_API_KEY 环境变量或在初始化时提供")
+
+        self._headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+            "Accept": "*/*",
+        }
+
+    def _parse_search_response(self, response_dict: Dict[str, Any], query: str) -> TavilyResponse:
+        """从 Tavily 原始响应中解析出结构化的 TavilyResponse 对象"""
+        final_response = TavilyResponse(query=query)
+        final_response.answer = response_dict.get("answer")
+
+        for item in response_dict.get("results", []) or []:
+            final_response.score = item.get("score")
+            final_response.webpages.append(
+                WebpageResult(
+                    name=item.get("title", "") or "",
+                    url=item.get("url", "") or "",
+                    snippet=item.get("content", "") or "",
+                    date_last_crawled=item.get("published_date", None),
+                )
+            )
+        return final_response
+
+    @with_graceful_retry(SEARCH_API_RETRY_CONFIG, default_return=TavilyResponse(query="搜索失败"))
+    def _search_internal(self, **kwargs) -> TavilyResponse:
+        """内部通用的搜索执行器，所有工具最终都调用此方法"""
+        query = kwargs.get("query", "Unknown Query")
+        payload: Dict[str, Any] = {
+            "query": query,
+            "max_results": kwargs.get("max_results", 10),
+            "search_depth": kwargs.get("search_depth", "advanced"),
+            "include_answer": True,
+        }
+        if kwargs.get("days"):
+            payload["days"] = kwargs["days"]
+        if kwargs.get("topics"):
+            payload["topics"] = kwargs["topics"]
+        if kwargs.get("include_domains"):
+            payload["include_domains"] = kwargs["include_domains"]
+
+        try:
+            response = requests.post(
+                f"{self.TAVILY_BASE_URL}/search",
+                headers=self._headers,
+                json=payload,
+                timeout=60,
+            )
+            response.raise_for_status()
+            return self._parse_search_response(response.json(), query)
+        except requests.exceptions.RequestException as e:
+            logger.exception(f"Tavily 搜索时发生网络错误: {str(e)}")
+            raise e
+        except Exception as e:
+            logger.exception(f"Tavily 响应处理异常: {str(e)}")
+            raise e
+
+    def comprehensive_search(self, query: str, max_results: int = 10) -> TavilyResponse:
+        """
+        【工具】综合搜索: 获取关于某个主题的全面信息，包括网页。
+        """
+        logger.info(f"--- TOOL: 综合搜索 (query: {query}) ---")
+        return self._search_internal(query=query, max_results=max_results)
+
+    def search_last_24_hours(self, query: str, max_results: int = 10) -> TavilyResponse:
+        """
+        【工具】搜索24小时内信息: 获取关于某个主题的最新动态。
+        """
+        logger.info(f"--- TOOL: 搜索24小时内信息 (query: {query}) ---")
+        return self._search_internal(query=query, max_results=max_results, days=1)
+
+    def search_last_week(self, query: str, max_results: int = 10) -> TavilyResponse:
+        """
+        【工具】搜索本周信息: 获取关于某个主题过去一周内的主要报道。
+        """
+        logger.info(f"--- TOOL: 搜索本周信息 (query: {query}) ---")
+        return self._search_internal(query=query, max_results=max_results, days=7)
+
+
 # --- 3. 测试与使用示例 ---
 def load_agent_from_config():
     """根据配置文件选择并加载搜索Agent"""
+    if settings.SEARCH_TOOL_TYPE == "TavilyAPI" and settings.TAVILY_API_KEY:
+        logger.info("加载 TavilySearch Agent")
+        return TavilySearch()
     if settings.BOCHA_WEB_SEARCH_API_KEY:
         logger.info("加载 BochaMultimodalSearch Agent")
         return BochaMultimodalSearch()

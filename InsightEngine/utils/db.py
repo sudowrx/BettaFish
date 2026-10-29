@@ -7,6 +7,7 @@
 """
 
 from __future__ import annotations
+import asyncio
 import os
 from typing import Any, Dict, Iterable, List, Optional, Union
 
@@ -22,6 +23,14 @@ __all__ = [
 
 
 _engine: Optional[AsyncEngine] = None
+# engine 必须按 event loop 分开缓存。
+# SQLAlchemy 的 async engine 会把连接池绑定到「创建它的那个 loop」，
+# 跨 loop 复用同一个 engine 时 asyncpg 会抛:
+#   RuntimeError: ... got Future ... attached to a different loop
+# 原实现是全局单例，而调用方（InsightEngine/tools/search.py 的 _execute_query）
+# 每次都 asyncio.get_event_loop()，可能拿到不同的 loop，于是踩坑。
+# 切到 PostgreSQL(asyncpg) 后这个问题才暴露 —— MySQL 的 aiomysql 不这么严格。
+_engines_by_loop: Dict[Any, AsyncEngine] = {}
 
 
 def _parse_database_url(database_url: str) -> URL:
@@ -91,15 +100,30 @@ def _build_database_url() -> str:
 
 
 def get_async_engine() -> AsyncEngine:
-    global _engine
-    if _engine is None:
-        database_url: str = _build_database_url()
-        _engine = create_async_engine(
-            database_url,
-            pool_pre_ping=True,
-            pool_recycle=1800,
-        )
-    return _engine
+    """取得当前 event loop 专属的 engine（每个 loop 一个独立连接池）。"""
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        # 不在 async 上下文中（理论上不会发生），退回全局单例
+        global _engine
+        if _engine is None:
+            _engine = _make_engine()
+        return _engine
+
+    engine = _engines_by_loop.get(loop)
+    if engine is None:
+        engine = _make_engine()
+        _engines_by_loop[loop] = engine
+    return engine
+
+
+def _make_engine() -> AsyncEngine:
+    database_url: str = _build_database_url()
+    return create_async_engine(
+        database_url,
+        pool_pre_ping=True,
+        pool_recycle=1800,
+    )
 
 
 async def fetch_all(query: str, params: Optional[Union[Iterable[Any], Dict[str, Any]]] = None) -> List[Dict[str, Any]]:

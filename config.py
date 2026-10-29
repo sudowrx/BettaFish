@@ -80,7 +80,7 @@ class Settings(BaseSettings):
     # Tavily API（申请地址：https://www.tavily.com/）
     TAVILY_API_KEY: Optional[str] = Field(None, description="Tavily API（申请地址：https://www.tavily.com/）API密钥，用于Tavily网络搜索")
 
-    SEARCH_TOOL_TYPE: Literal["AnspireAPI", "BochaAPI"] = Field("AnspireAPI", description="网络搜索工具类型，支持BochaAPI或AnspireAPI两种，默认为AnspireAPI")
+    SEARCH_TOOL_TYPE: Literal["AnspireAPI", "BochaAPI", "TavilyAPI"] = Field("AnspireAPI", description="网络搜索工具类型，支持BochaAPI / AnspireAPI / TavilyAPI三种，默认为AnspireAPI")
     # Bocha API（申请地址：https://open.bochaai.com/）
     BOCHA_BASE_URL: Optional[str] = Field("https://api.bocha.cn/v1/ai-search", description="Bocha AI 搜索BaseUrl或博查网页搜索BaseUrl")
     BOCHA_WEB_SEARCH_API_KEY: Optional[str] = Field(None, description="Bocha API（申请地址：https://open.bochaai.com/）API密钥，用于Bocha搜索")

@@ -40,15 +40,22 @@ class LLMClient:
         self.base_url = base_url
         self.model_name = model_name
         self.provider = model_name
-        timeout_fallback = os.getenv("LLM_REQUEST_TIMEOUT") or os.getenv("INSIGHT_ENGINE_REQUEST_TIMEOUT") or "1800"
+        # 超时上限。豆包/推理模型单次 15-25s，300s 已足够宽松。
+        # 原值 1800(30min) 的问题: 服务端半开连接(CLOSE-WAIT)时要挂 30 分钟
+        # 才抛异常，再叠加 with_retry 的指数退避(6 次, 首次 60s)，
+        # 最坏情况一个请求能拖 3.5 小时，表现为"任务卡住不动"。
+        timeout_fallback = os.getenv("LLM_REQUEST_TIMEOUT") or os.getenv("INSIGHT_ENGINE_REQUEST_TIMEOUT") or "300"
         try:
             self.timeout = float(timeout_fallback)
         except ValueError:
-            self.timeout = 1800.0
+            self.timeout = 300.0
 
         client_kwargs: Dict[str, Any] = {
             "api_key": api_key,
-            "max_retries": 0,
+            # 连接级重试: httpx 层遇到 socket 挂起/连接重置时立即换新连接，
+            # 比等 with_retry 的 60s 起步退避快得多。
+            "max_retries": 2,
+            "timeout": self.timeout,
         }
         if base_url:
             client_kwargs["base_url"] = base_url

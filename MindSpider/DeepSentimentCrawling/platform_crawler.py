@@ -276,13 +276,17 @@ postgres_db_config = {{
             save_data_option = "postgres" if is_postgresql else "db"
 
             # 构建命令
+            # HEADLESS 通过环境变量控制：服务器上没有图形界面时必须走
+            # headless（扫码登录走 MINDSPIDER_QR_OUT 输出的二维码文件）。
+            headless = os.getenv("MINDSPIDER_HEADLESS", "true").lower()
+            headless_flag = "true" if headless in ("1", "true", "yes", "y", "t") else "false"
             cmd = [
                 sys.executable, "main.py",
                 "--platform", platform,
                 "--lt", login_type,
                 "--type", "search",
                 "--save_data_option", save_data_option,
-                "--headless", "false"
+                "--headless", headless_flag
             ]
             
             logger.info(f"执行命令: {' '.join(cmd)}")
