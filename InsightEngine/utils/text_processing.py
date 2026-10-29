@@ -290,6 +290,9 @@ def format_search_results_for_prompt(search_results: List[Dict[str, Any]],
     """
     格式化搜索结果用于提示词
 
+    除正文外，必须一并带上互动数/昵称/时间/来源表等结构化字段。
+    否则 LLM 看不到真实数值，只能靠编造填充字数——这是报告数字失真的根因。
+
     Args:
         search_results: 搜索结果列表
         max_length: 每个结果的最大长度
@@ -305,8 +308,41 @@ def format_search_results_for_prompt(search_results: List[Dict[str, Any]],
 
     for result in search_results:
         content = result.get('content', '')
-        if content:
-            truncated_content = truncate_content(content, max_length)
+        if not content:
+            continue
+
+        truncated_content = truncate_content(content, max_length)
+
+        # 收集真实可用的结构化字段，只保留有值的
+        meta_parts = []
+        platform = result.get('platform') or result.get('source_table')
+        if platform:
+            meta_parts.append(f"平台={platform}")
+        nickname = result.get('author') or result.get('author_nickname')
+        if nickname:
+            meta_parts.append(f"作者={nickname}")
+        publish_time = result.get('published_date') or result.get('publish_time')
+        if publish_time:
+            meta_parts.append(f"发布时间={publish_time}")
+        engagement = result.get('engagement') or {}
+        if isinstance(engagement, dict):
+            eng_parts = []
+            # 键名与 MediaCrawlerDB._extract_engagement 的 mapping 对齐
+            for key, label in (('likes', '点赞'), ('comments', '评论'), ('shares', '转发/分享'),
+                               ('views', '播放'), ('favorites', '收藏')):
+                val = engagement.get(key)
+                if val not in (None, '', 0, '0'):
+                    eng_parts.append(f"{label}={val}")
+            if eng_parts:
+                meta_parts.append("互动数(" + ", ".join(eng_parts) + ")")
+        source_keyword = result.get('source_keyword')
+        if source_keyword:
+            meta_parts.append(f"来源关键词={source_keyword}")
+
+        if meta_parts:
+            meta_line = "【真实数据】" + " | ".join(meta_parts)
+            formatted_results.append(f"{meta_line}\n正文：{truncated_content}")
+        else:
             formatted_results.append(truncated_content)
 
     if not formatted_results:

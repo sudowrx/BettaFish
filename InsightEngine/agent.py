@@ -869,6 +869,7 @@ class DeepSearchAgent:
                         "content_type": result.content_type,
                         "author": result.author_nickname,
                         "engagement": result.engagement,
+                        "source_keyword": result.source_keyword,
                     }
                 )
 
@@ -1033,6 +1034,7 @@ class DeepSearchAgent:
                             "content_type": result.content_type,
                             "author": result.author_nickname,
                             "engagement": result.engagement,
+                            "source_keyword": result.source_keyword,
                         }
                     )
 
