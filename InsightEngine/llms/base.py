@@ -4,6 +4,7 @@ Unified OpenAI-compatible LLM client for the Insight Engine, with retry support.
 
 import os
 import sys
+import time
 from datetime import datetime
 from typing import Any, Dict, Optional, Iterator, Generator
 from loguru import logger
@@ -141,20 +142,95 @@ class LLMClient:
     def stream_invoke_to_string(self, system_prompt: str, user_prompt: str, **kwargs) -> str:
         """
         流式调用LLM并安全地拼接为完整字符串（避免UTF-8多字节字符截断）
-        
+
+        墙钟超时说明：
+        httpx 的 read timeout 在流式模式下只计算「两个 chunk 之间」的间隔，
+        **首字节到达之前完全不计时**。推理模型（豆包 V4 等）在生成前有很长的
+        静默思考期，如果服务端迟迟不发第一个 chunk，httpx 的 timeout 永远不会触发，
+        请求就无限期挂着 —— 表现为「日志不推进、CPU 不动、任务像死了」。
+
+        实测（2026-10-29）：一个流式请求建立连接后 20 分钟没有任何 chunk，
+        TCP 层只有 20 秒一次的 keepalive，lastsnd/lastrcv 持续推进但内容为 0。
+
+        所以这里自己实现墙钟上限：超过 deadline 就主动关闭 stream 并抛异常，
+        让上层的 with_retry 以「快速失败」的方式重试。
+
         Args:
             system_prompt: 系统提示词
             user_prompt: 用户提示词
             **kwargs: 额外参数（temperature, top_p等）
-            
+
         Returns:
             完整的响应字符串
         """
         # 以字节形式收集所有块
         byte_chunks = []
-        for chunk in self.stream_invoke(system_prompt, user_prompt, **kwargs):
-            byte_chunks.append(chunk.encode('utf-8'))
-        
+
+        timeout = kwargs.pop("timeout", self.timeout)
+        # 流式墙钟上限：默认取 timeout 的 2 倍（timeout 本身是单次 chunk 间隔上限），
+        # 可用 STREAM_WALL_CLOCK_TIMEOUT 单独覆盖。
+        wall_clock = float(
+            os.getenv("STREAM_WALL_CLOCK_TIMEOUT") or (timeout * 2)
+        )
+
+        stream_iter = self.stream_invoke(system_prompt, user_prompt, timeout=timeout, **kwargs)
+        try:
+            # 为什么用「工作线程 + queue」而不是直接 for 循环：
+            #
+            # httpx 的 read timeout 在流式模式下只计算「两个 chunk 之间」的间隔，
+            # **首字节到达之前完全不计时**。推理模型（豆包 V4 等）在生成前有很长的
+            # 静默思考期，服务端迟迟不发第一个 chunk 时 httpx 的 timeout 永远不会触发。
+            #
+            # 实测（2026-10-29）：一个流式请求建立连接后 20 分钟没有任何 chunk，
+            # TCP 层只有 20 秒一次的 keepalive（lastsnd/lastrcv 持续推进但内容为 0）。
+            #
+            # 而生成器的 close() 也救不了：GeneratorExit 无法打断阻塞在 socket read
+            # 或 time.sleep() 上的迭代器。所以必须把迭代放到独立线程，
+            # 主线程用 queue.get(timeout=...) 实现真正的墙钟上限。
+            #
+            # 超过上限 → 主线程抛 TimeoutError，后台线程被设为 daemon 随进程退出，
+            # 上层的 with_retry 会以「快速失败」方式重试，而不是永远挂着。
+            import queue
+            import threading
+
+            q: "queue.Queue" = queue.Queue(maxsize=256)
+            _sentinel = object()
+
+            def _pump():
+                try:
+                    for chunk in stream_iter:
+                        q.put(chunk.encode('utf-8'))
+                    q.put(_sentinel)
+                except BaseException as exc:  # noqa: BLE001
+                    try:
+                        q.put(exc)
+                    except Exception:
+                        pass
+
+            pump = threading.Thread(target=_pump, daemon=True)
+            pump.start()
+
+            while True:
+                try:
+                    item = q.get(timeout=wall_clock)
+                except queue.Empty:
+                    raise TimeoutError(
+                        f"流式请求超过墙钟上限 {wall_clock:.0f}s（未收到完整响应）"
+                    ) from None
+                if item is _sentinel:
+                    break
+                if isinstance(item, BaseException):
+                    raise item
+                byte_chunks.append(item)
+        finally:
+            # 主动关闭底层连接，避免半开的 socket 继续挂着
+            close = getattr(stream_iter, "close", None)
+            if close is not None:
+                try:
+                    close()
+                except Exception:
+                    pass
+
         # 拼接所有字节，然后一次性解码
         if byte_chunks:
             return b''.join(byte_chunks).decode('utf-8', errors='replace')

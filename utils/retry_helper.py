@@ -34,6 +34,23 @@ def _should_retry_exception(exc: Exception) -> bool:
     return status_code in RETRYABLE_HTTP_STATUS_CODES or 500 <= status_code <= 599
 
 
+def _emit_retry_log(func_name: str, attempt: int, error: str, delay: float, final: bool = False) -> None:
+    """把重试事件同时打到标准 logging。
+
+    loguru 的 sink 不保证落进引擎自己的日志文件（insight.log 等），
+    结果是「任务静默」时完全看不到重试发生过 —— 排查时只能靠猜。
+    这里额外用标准 logging 打一条，让根因在日志里可见。
+    """
+    import logging
+
+    level = logging.ERROR if final else logging.WARNING
+    msg = (
+        f"[RETRY] {func_name} 第 {attempt} 次尝试失败: {error[:200]}"
+        + (f" | 最终失败" if final else f" | {delay:.1f}s 后重试")
+    )
+    logging.getLogger("bettafish.retry").log(level, msg)
+
+
 # 配置日志
 class RetryConfig:
     """重试配置类"""
@@ -113,22 +130,28 @@ def with_retry(config: RetryConfig = None):
                             f"函数 {func.__name__} 遇到不可重试的 HTTP {status_code} 错误: {e}"
                         )
                         raise
-                    
+
                     if attempt == config.max_retries:
                         # 最后一次尝试也失败了
                         logger.error(f"函数 {func.__name__} 在 {config.max_retries + 1} 次尝试后仍然失败")
                         logger.error(f"最终错误: {str(e)}")
+                        _emit_retry_log(
+                            func.__name__, attempt + 1, str(e), 0.0, final=True
+                        )
                         raise e
-                    
+
                     # 计算延迟时间
                     delay = min(
                         config.initial_delay * (config.backoff_factor ** attempt),
                         config.max_delay
                     )
-                    
+
                     logger.warning(f"函数 {func.__name__} 第 {attempt + 1} 次尝试失败: {str(e)}")
                     logger.info(f"将在 {delay:.1f} 秒后进行第 {attempt + 2} 次尝试...")
-                    
+                    # loguru 的 sink 不一定落进引擎日志文件，这里额外用标准 logging
+                    # 打一条，保证「任务为什么静默」在 insight.log 里看得见。
+                    _emit_retry_log(func.__name__, attempt + 1, str(e), delay)
+
                     time.sleep(delay)
                 
                 except Exception as e:
@@ -264,11 +287,20 @@ def make_retryable_request(
     return _execute()
 
 # 预定义一些常用的重试配置
+# LLM 调用专用重试配置。
+#
+# 原来的配置(max_retries=6, initial_delay=60, backoff=2, max_delay=600)
+# 纯退避总时长 = 60+120+240+480+600+600 = 2100s = 35 分钟。
+# 叠加 300s 的单次请求超时，一条卡死的请求能让整个报告任务静默 40 分钟以上，
+# 表现为「日志不推进、CPU 不动、任务像挂了」。
+#
+# 豆包/推理模型单次正常耗时 15-60s，短暂失败重试 2-3 次足够；
+# 真失败应该尽快抛出让上层感知，而不是在退避里睡半小时。
 LLM_RETRY_CONFIG = RetryConfig(
-    max_retries=6,        # 保持额外重试次数
-    initial_delay=60.0,   # 首次等待至少 1 分钟
-    backoff_factor=2.0,   # 继续使用指数退避
-    max_delay=600.0       # 单次等待最长 10 分钟
+    max_retries=3,        # 3 次足够覆盖瞬时网络抖动
+    initial_delay=5.0,    # 快速起步，不让用户干等一分钟
+    backoff_factor=2.0,   # 指数退避
+    max_delay=60.0        # 单次等待最长 1 分钟
 )
 
 SEARCH_API_RETRY_CONFIG = RetryConfig(
