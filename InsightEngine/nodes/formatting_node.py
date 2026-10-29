@@ -4,6 +4,7 @@
 """
 
 import json
+import os
 from typing import List, Dict, Any
 from loguru import logger
 
@@ -71,9 +72,13 @@ class ReportFormattingNode(BaseNode):
             logger.info("正在格式化最终报告")
             
             # 调用LLM（流式，安全拼接UTF-8）
+            # max_tokens 必须显式给足：服务端默认只有 4096，长报告会在
+            # 最后一节的句子中间被硬截断（实测停在"平均互动量达12"）。
+            # 模型实测支持到 32768，这里给 24576 留足余量。
             response = self.llm_client.stream_invoke_to_string(
                 SYSTEM_PROMPT_REPORT_FORMATTING,
                 message,
+                max_tokens=int(os.getenv("REPORT_FORMAT_MAX_TOKENS") or 24576),
             )
             
             # 处理响应

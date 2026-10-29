@@ -75,8 +75,10 @@ class LLMClient:
             {"role": "user", "content": user_prompt},
         ]
 
-        allowed_keys = {"temperature", "top_p", "presence_penalty", "frequency_penalty", "stream"}
+        allowed_keys = {"temperature", "top_p", "presence_penalty", "frequency_penalty", "stream", "max_tokens"}
         extra_params = {key: value for key, value in kwargs.items() if key in allowed_keys and value is not None}
+        if "max_tokens" not in extra_params:
+            extra_params["max_tokens"] = int(os.getenv("LLM_MAX_TOKENS") or 16384)
 
         timeout = kwargs.pop("timeout", self.timeout)
 
@@ -114,10 +116,15 @@ class LLMClient:
             {"role": "user", "content": user_prompt},
         ]
 
-        allowed_keys = {"temperature", "top_p", "presence_penalty", "frequency_penalty"}
+        allowed_keys = {"temperature", "top_p", "presence_penalty", "frequency_penalty", "max_tokens"}
         extra_params = {key: value for key, value in kwargs.items() if key in allowed_keys and value is not None}
         # 强制使用流式
         extra_params["stream"] = True
+        # 默认输出额度。豆包/OpenAI 兼容接口在未指定 max_tokens 时使用服务端默认
+        # （实测豆包默认 4096），长报告会在句子中间被硬截断（finish_reason='length'），
+        # 表现为报告最后一节停在半句话上。模型实测支持到 32768。
+        if "max_tokens" not in extra_params:
+            extra_params["max_tokens"] = int(os.getenv("LLM_MAX_TOKENS") or 16384)
 
         timeout = kwargs.pop("timeout", self.timeout)
 
