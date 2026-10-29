@@ -33,6 +33,12 @@ class Settings(BaseSettings):
     DEFAULT_SEARCH_TOPIC_ON_PLATFORM_LIMIT: int = Field(200, description="平台搜索话题最大数")
     MAX_SEARCH_RESULTS_FOR_LLM: int = Field(0, description="供LLM用搜索结果最大数")
     MAX_HIGH_CONFIDENCE_SENTIMENT_RESULTS: int = Field(0, description="高置信度情感分析最大数")
+    KEYWORD_OPTIMIZER_MAX_KEYWORDS: int = Field(5, description="关键词优化后实际用于检索的最大关键词数（防止长尾词过多）")
+    KEYWORD_OPTIMIZER_FALLBACK_ENABLED: bool = Field(True, description="优化词零命中时是否回退到原始查询词")
+    KEYWORD_OPTIMIZER_FALLBACK_MAX_TRIES: int = Field(12, description="回退检索最多尝试的候选词数量")
+    KEYWORD_OPTIMIZER_MIN_QUERY_LEN: int = Field(2, description="回退候选词最小长度，过短的词不做兜底")
+    KEYWORD_OPTIMIZER_CACHE_ENABLED: bool = Field(True, description="是否缓存关键词优化结果（同一查询只调一次 LLM）")
+    KEYWORD_OPTIMIZER_CACHE_TTL: int = Field(1800, description="关键词优化缓存有效期（秒）")
     OUTPUT_DIR: str = Field("reports", description="输出路径")
     SAVE_INTERMEDIATE_STATES: bool = Field(True, description="是否保存中间状态")
 

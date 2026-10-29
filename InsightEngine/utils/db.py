@@ -117,6 +117,31 @@ def get_async_engine() -> AsyncEngine:
     return engine
 
 
+def dispose_engine_for_loop(loop) -> None:
+    """
+    关闭并移除指定 event loop 的 engine（连接池清理）。
+
+    场景：agent 在"当前 loop 已在运行"时会另开线程 + 新 loop 跑查询，
+    每次都会创建一个新 engine。若不清理，连接池会随查询次数无限增长。
+    """
+    engine = _engines_by_loop.pop(loop, None)
+    if engine is None:
+        return
+    try:
+        asyncio.get_event_loop()
+    except RuntimeError:
+        pass
+    try:
+        # 在该 loop 内同步执行 dispose
+        loop.run_until_complete(engine.dispose())
+    except Exception:
+        # 尽力而为：清理失败不影响主流程
+        try:
+            engine.sync_engine.dispose()
+        except Exception:
+            pass
+
+
 def _make_engine() -> AsyncEngine:
     database_url: str = _build_database_url()
     return create_async_engine(

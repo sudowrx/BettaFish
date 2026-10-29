@@ -278,7 +278,9 @@ class DeepSearchAgent:
             "search_query": search_query,
             "search_results": format_search_results_for_prompt(
                 search_results, self.config.SEARCH_CONTENT_MAX_LENGTH
-            )
+            ),
+            # 把真实命中条数告诉 LLM，避免它编造量级
+            "search_result_count": len(search_results),
         }
         
         # 更新状态
@@ -361,6 +363,8 @@ class DeepSearchAgent:
                 "search_results": format_search_results_for_prompt(
                     search_results, self.config.SEARCH_CONTENT_MAX_LENGTH
                 ),
+                # 把真实命中条数告诉 LLM，避免它编造量级
+                "search_result_count": len(search_results),
                 "paragraph_latest_state": paragraph.research.latest_summary
             }
             

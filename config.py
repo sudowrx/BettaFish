@@ -75,7 +75,11 @@ class Settings(BaseSettings):
     KEYWORD_OPTIMIZER_API_KEY: Optional[str] = Field(None, description="SQL Keyword Optimizer（推荐 qwen-plus，官方申请地址：https://www.aliyun.com/product/bailian）API 密钥")
     KEYWORD_OPTIMIZER_BASE_URL: Optional[str] = Field(None, description="Keyword Optimizer BaseUrl，可按所选服务配置")
     KEYWORD_OPTIMIZER_MODEL_NAME: Optional[str] = Field(None, description="Keyword Optimizer LLM 模型名称，例如 qwen-plus")
-    
+
+    # 关键词优化缓存（一次 LLM 优化约 20s，同一查询在首搜+多轮反思中会重复出现）
+    KEYWORD_OPTIMIZER_CACHE_ENABLED: bool = Field(True, description="是否缓存关键词优化结果")
+    KEYWORD_OPTIMIZER_CACHE_TTL: int = Field(1800, description="关键词优化缓存有效期（秒）")
+
     # ================== 网络工具配置 ====================
     # Tavily API（申请地址：https://www.tavily.com/）
     TAVILY_API_KEY: Optional[str] = Field(None, description="Tavily API（申请地址：https://www.tavily.com/）API密钥，用于Tavily网络搜索")

@@ -297,12 +297,19 @@ def format_search_results_for_prompt(search_results: List[Dict[str, Any]],
     Returns:
         格式化后的内容列表
     """
+    if not search_results:
+        # 明确告诉 LLM 没有数据，而不是给它一个空数组让它自行脑补
+        return ["【本次检索未命中任何相关内容。以下内容没有任何真实数据支撑，请如实说明未检索到相关内容，不要编造任何数字、事件或用户引语。】"]
+
     formatted_results = []
-    
+
     for result in search_results:
         content = result.get('content', '')
         if content:
             truncated_content = truncate_content(content, max_length)
             formatted_results.append(truncated_content)
-    
+
+    if not formatted_results:
+        return ["【本次检索命中的结果内容为空。以下内容没有任何真实数据支撑，请如实说明未检索到相关内容，不要编造任何数字、事件或用户引语。】"]
+
     return formatted_results

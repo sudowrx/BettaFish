@@ -27,6 +27,7 @@ import os
 import json
 from loguru import logger
 import asyncio
+import threading
 from typing import List, Dict, Any, Optional, Literal
 from dataclasses import dataclass, field
 from ..utils.db import fetch_all
@@ -76,8 +77,18 @@ class MediaCrawlerDB:
         pass
         
     def _execute_query(self, query: str, params: Any = None) -> List[Dict[str, Any]]:
+        """
+        执行数据库查询。
+
+        这里必须处理"event loop 已在运行"的场景：
+        - agent 流程是 async 的，调用本方法时当前线程已经有一个正在运行的 loop，
+          此时 loop.run_until_complete() 会抛 "This event loop is already running"
+        - 原实现捕获异常后 return []，导致所有查询静默返回空结果，
+          LLM 拿不到数据就只能编造内容（曾出现"17个平台/3.2亿用户"的幻觉数据）
+
+        修复：若当前 loop 正在运行，则在独立线程里新建 loop 执行。
+        """
         try:
-            # 获取或创建event loop
             try:
                 loop = asyncio.get_event_loop()
                 if loop.is_closed():
@@ -86,13 +97,54 @@ class MediaCrawlerDB:
             except RuntimeError:
                 loop = asyncio.new_event_loop()
                 asyncio.set_event_loop(loop)
-            
+
+            if loop.is_running():
+                # 当前线程已有运行中的 loop -> 用独立线程跑一个新的 loop
+                return self._run_in_new_thread(query, params)
+
             # 直接运行协程
             return loop.run_until_complete(fetch_all(query, params))
-        
+
         except Exception as e:
             logger.exception(f"数据库查询时发生错误: {e}")
+            # 不再静默吞掉：至少要让上层知道这次查询失败了
+            logger.warning(f"查询失败并返回空结果: {str(query)[:120]}")
             return []
+
+    @staticmethod
+    def _run_in_new_thread(query: str, params: Any = None) -> List[Dict[str, Any]]:
+        """在独立线程的新 event loop 中执行查询（用于当前 loop 已在运行的场景）"""
+        result_box = {}
+        error_box = {}
+
+        def _runner():
+            new_loop = asyncio.new_event_loop()
+            try:
+                asyncio.set_event_loop(new_loop)
+                result_box["result"] = new_loop.run_until_complete(fetch_all(query, params))
+            except Exception as e:  # noqa: BLE001
+                error_box["error"] = e
+            finally:
+                # 清理这个临时 loop 的 engine（连接池），否则会随查询次数无限增长
+                # 注意：必须在 close 之前 dispose
+                try:
+                    from ..utils.db import dispose_engine_for_loop
+
+                    dispose_engine_for_loop(new_loop)
+                except Exception:
+                    pass
+                try:
+                    new_loop.close()
+                except Exception:
+                    pass
+
+        thread = threading.Thread(target=_runner, daemon=True)
+        thread.start()
+        thread.join()
+
+        if "error" in error_box:
+            raise error_box["error"]
+        return result_box.get("result", [])
 
     @staticmethod
     def _to_datetime(ts: Any) -> Optional[datetime]:

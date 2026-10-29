@@ -285,24 +285,31 @@ def truncate_content(content: str, max_length: int = 20000) -> str:
         return truncated + "..."
 
 
-def format_search_results_for_prompt(search_results: List[Dict[str, Any]], 
+def format_search_results_for_prompt(search_results: List[Dict[str, Any]],
                                    max_length: int = 20000) -> List[str]:
     """
     格式化搜索结果用于提示词
-    
+
     Args:
         search_results: 搜索结果列表
         max_length: 每个结果的最大长度
-        
+
     Returns:
         格式化后的内容列表
     """
+    if not search_results:
+        # 明确告诉 LLM 没有数据，而不是给它一个空数组让它自行脑补
+        return ["【本次检索未命中任何相关内容。以下内容没有任何真实数据支撑，请如实说明未检索到相关内容，不要编造任何数字、事件或用户引语。】"]
+
     formatted_results = []
-    
+
     for result in search_results:
         content = result.get('content', '')
         if content:
             truncated_content = truncate_content(content, max_length)
             formatted_results.append(truncated_content)
-    
+
+    if not formatted_results:
+        return ["【本次检索命中的结果内容为空。以下内容没有任何真实数据支撑，请如实说明未检索到相关内容，不要编造任何数字、事件或用户引语。】"]
+
     return formatted_results

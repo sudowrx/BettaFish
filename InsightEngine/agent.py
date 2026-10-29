@@ -253,11 +253,19 @@ class DeepSearchAgent:
         logger.info(f"  🔍 原始查询: '{query}'")
         logger.info(f"  ✨ 优化后关键词: {optimized_response.optimized_keywords}")
 
+        # 构造实际检索词列表：
+        # 1) 原始查询词永远排第一（保证主体词一定被检索，不被优化器的长尾词挤掉）
+        # 2) 优化词作为补充，受 KEYWORD_OPTIMIZER_MAX_KEYWORDS 限制
+        #    小词库场景下优化器常产出"通用人工智能争议"这类长尾词，
+        #    而检索是 LIKE '%kw%' 精确子串匹配，长尾词必然落空
+        search_keywords = self._build_search_keywords(query, optimized_response.optimized_keywords)
+        logger.info(f"  📋 实际检索词: {search_keywords}")
+
         # 使用优化后的关键词进行多次查询并整合结果
         all_results = []
         total_count = 0
 
-        for keyword in optimized_response.optimized_keywords:
+        for keyword in search_keywords:
             logger.info(f"    查询关键词: '{keyword}'")
 
             try:
@@ -289,7 +297,7 @@ class DeepSearchAgent:
                 elif tool_name == "get_comments_for_topic":
                     # 使用配置文件中的默认值，按关键词数量分配，但保证最小值
                     limit = self.config.DEFAULT_GET_COMMENTS_FOR_TOPIC_LIMIT // len(
-                        optimized_response.optimized_keywords
+                        search_keywords
                     )
                     limit = max(limit, 50)
                     response = self.search_agency.get_comments_for_topic(
@@ -336,6 +344,73 @@ class DeepSearchAgent:
         unique_results = self._deduplicate_results(all_results)
         logger.info(f"  总计找到 {total_count} 条结果，去重后 {len(unique_results)} 条")
 
+        # 零命中回退：优化词全部落空时，用更宽松的候选词重新检索
+        # （小语料库 + 长尾优化词的典型场景，不回退就会拿着空结果让 LLM 幻觉编数据）
+        if not unique_results and total_count == 0:
+            fallback_keywords = self._build_fallback_keywords(query)
+            if fallback_keywords:
+                logger.warning(
+                    f"  ⚠️ 优化关键词零命中，启用宽匹配回退: {fallback_keywords}"
+                )
+                for keyword in fallback_keywords:
+                    logger.info(f"    回退查询关键词: '{keyword}'")
+                    try:
+                        if tool_name == "search_topic_globally":
+                            response = self.search_agency.search_topic_globally(
+                                topic=keyword,
+                                limit_per_table=self.config.DEFAULT_SEARCH_TOPIC_GLOBALLY_LIMIT_PER_TABLE,
+                            )
+                        elif tool_name == "search_topic_by_date":
+                            start_date = kwargs.get("start_date")
+                            end_date = kwargs.get("end_date")
+                            if not start_date or not end_date:
+                                continue
+                            response = self.search_agency.search_topic_by_date(
+                                topic=keyword,
+                                start_date=start_date,
+                                end_date=end_date,
+                                limit_per_table=self.config.DEFAULT_SEARCH_TOPIC_BY_DATE_LIMIT_PER_TABLE,
+                            )
+                        elif tool_name == "get_comments_for_topic":
+                            response = self.search_agency.get_comments_for_topic(
+                                topic=keyword,
+                                limit=self.config.DEFAULT_GET_COMMENTS_FOR_TOPIC_LIMIT,
+                            )
+                        elif tool_name == "search_topic_on_platform":
+                            platform = kwargs.get("platform")
+                            if not platform:
+                                continue
+                            response = self.search_agency.search_topic_on_platform(
+                                platform=platform,
+                                topic=keyword,
+                                start_date=kwargs.get("start_date"),
+                                end_date=kwargs.get("end_date"),
+                                limit=self.config.DEFAULT_SEARCH_TOPIC_ON_PLATFORM_LIMIT,
+                            )
+                        else:
+                            response = self.search_agency.search_topic_globally(
+                                topic=keyword,
+                                limit_per_table=self.config.DEFAULT_SEARCH_TOPIC_GLOBALLY_LIMIT_PER_TABLE,
+                            )
+
+                        if response and response.results:
+                            logger.info(
+                                f"     回退命中 '{keyword}': {len(response.results)} 条结果"
+                            )
+                            all_results.extend(response.results)
+                            total_count += len(response.results)
+                        else:
+                            logger.info(f"     回退未命中 '{keyword}'")
+                    except Exception as e:
+                        logger.error(f"      回退查询'{keyword}'时出错: {str(e)}")
+                        continue
+
+                if all_results:
+                    unique_results = self._deduplicate_results(all_results)
+                    logger.info(
+                        f"  回退检索共找到 {total_count} 条结果，去重后 {len(unique_results)} 条"
+                    )
+
         if ENABLE_CLUSTERING:
             unique_results = self._cluster_and_sample_results(
                 unique_results,
@@ -369,6 +444,104 @@ class DeepSearchAgent:
                 logger.info(f"  ✅ 情感分析完成")
 
         return integrated_response
+
+    def _build_search_keywords(
+        self, original_query: str, optimized_keywords: List[str]
+    ) -> List[str]:
+        """
+        构造实际用于检索的关键词列表。
+
+        关键词优化器会把原始词扩展成 10~20 个长尾词（如 "人工智能" ->
+        ["通用人工智能争议", "AI辅助诊断医保", ...]）。但底层检索是
+        LIKE '%kw%' 精确子串匹配，长尾词在小规模语料库里几乎必然零命中，
+        导致"查得到数据却返回空"。
+
+        这里做两件事：
+        1. 原始查询词永远排在第一位，保证主体词一定会被检索
+        2. 优化词数量受 KEYWORD_OPTIMIZER_MAX_KEYWORDS 限制（默认 5），
+           避免每次工具调用都触发 10~20 次冗余查询
+        """
+        keywords = []
+        seen = set()
+
+        def _add(word):
+            if not word:
+                return
+            word = str(word).strip()
+            if not word or word in seen:
+                return
+            seen.add(word)
+            keywords.append(word)
+
+        _add(original_query)
+
+        max_kw = self.config.KEYWORD_OPTIMIZER_MAX_KEYWORDS
+        for kw in optimized_keywords or []:
+            if len(keywords) >= max_kw + 1:
+                break
+            _add(kw)
+
+        return keywords
+
+    def _build_fallback_keywords(self, query: str) -> List[str]:
+        """
+        构造宽匹配回退候选词。
+
+        当优化词全部零命中时，用更宽松的词重新检索：
+        - 去掉修饰后缀的原始词（"人工智能领域争议" -> "人工智能"）
+        - 按常见分隔符切分后的各分段
+        - 中英文分段（"AI辅助诊断医保" -> "AI" + "辅助诊断医保"）
+        - CJK 片段的 2 字滑动窗口（"诊断医保" -> "诊断"、"断医"、"医保"）
+
+        长度不足 KEYWORD_OPTIMIZER_MIN_QUERY_LEN 的分段会被丢弃，
+        避免用 "的"、"是" 这类过宽的词把整个库捞出来。
+
+        注意：PG 单次查询约 20ms，即使回退 15 次也只有 0.3s，
+        远低于一次 LLM 关键词优化（~20s）的成本，所以宁可多试几个。
+        """
+        if not self.config.KEYWORD_OPTIMIZER_FALLBACK_ENABLED:
+            return []
+
+        candidates = []
+        min_len = self.config.KEYWORD_OPTIMIZER_MIN_QUERY_LEN
+
+        def _add(word):
+            word = (word or "").strip()
+            if not word:
+                return
+            if len(word) < min_len:
+                return
+            if word not in candidates:
+                candidates.append(word)
+
+        raw = (query or "").strip()
+        _add(raw)
+
+        # 去掉常见的尾部修饰词
+        for suffix in ("领域", "争议", "事件", "问题", "相关", "最新", "现状", "分析"):
+            if raw.endswith(suffix) and len(raw) - len(suffix) >= min_len:
+                _add(raw[: -len(suffix)])
+
+        # 按常见分隔符切分
+        for sep in (" ", "，", ",", "、", "。", "的", "与", "和"):
+            if sep in raw:
+                for part in raw.split(sep):
+                    _add(part.strip())
+
+        # 中英文分段：ASCII 片段（如 "AI"）单独作为候选，优先尝试
+        ascii_parts = re.findall(r"[A-Za-z0-9]{2,}", raw)
+        cjk_parts = re.findall(r"[\u4e00-\u9fa5]{2,}", raw)
+        for part in ascii_parts:
+            _add(part)
+
+        # CJK 片段的 2 字滑动窗口（中文没有词边界，用窗口覆盖常见词）
+        for part in cjk_parts:
+            if len(part) <= 4:
+                _add(part)
+            for i in range(len(part) - 1):
+                _add(part[i : i + 2])
+
+        return candidates[: self.config.KEYWORD_OPTIMIZER_FALLBACK_MAX_TRIES]
 
     def _deduplicate_results(self, results: List) -> List:
         """
@@ -724,6 +897,8 @@ class DeepSearchAgent:
             "search_results": format_search_results_for_prompt(
                 search_results, self.config.MAX_CONTENT_LENGTH
             ),
+            # 把真实命中条数告诉 LLM，避免它编造量级
+            "search_result_count": len(search_results),
         }
 
         # 更新状态
@@ -885,6 +1060,8 @@ class DeepSearchAgent:
                 "search_results": format_search_results_for_prompt(
                     search_results, self.config.MAX_CONTENT_LENGTH
                 ),
+                # 把真实命中条数告诉 LLM，避免它编造量级
+                "search_result_count": len(search_results),
                 "paragraph_latest_state": paragraph.research.latest_summary,
             }
 

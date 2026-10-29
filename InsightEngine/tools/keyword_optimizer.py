@@ -7,6 +7,8 @@ from openai import OpenAI
 import json
 import sys
 import os
+import threading
+import time
 from typing import List, Dict, Any
 from dataclasses import dataclass
 
@@ -59,18 +61,51 @@ class KeywordOptimizer:
             base_url=self.base_url
         )
         self.model = model_name or settings.KEYWORD_OPTIMIZER_MODEL_NAME
-    
+
+        # 关键词优化缓存：一次 LLM 调用约 20s，而同一查询在
+        # 首轮搜索 + 3 轮反思里会重复出现，缓存可省下大量时间
+        self._cache = {}
+        self._cache_lock = threading.Lock()
+
+    def _cache_key(self, original_query: str, context: str) -> str:
+        return f"{original_query.strip()}||{context.strip()}"
+
+    def _cache_get(self, key: str):
+        if not settings.KEYWORD_OPTIMIZER_CACHE_ENABLED:
+            return None
+        with self._cache_lock:
+            entry = self._cache.get(key)
+            if not entry:
+                return None
+            created_at, value = entry
+            if time.time() - created_at > settings.KEYWORD_OPTIMIZER_CACHE_TTL:
+                self._cache.pop(key, None)
+                return None
+            return value
+
+    def _cache_set(self, key: str, value):
+        if not settings.KEYWORD_OPTIMIZER_CACHE_ENABLED:
+            return
+        with self._cache_lock:
+            self._cache[key] = (time.time(), value)
+
     def optimize_keywords(self, original_query: str, context: str = "") -> KeywordOptimizationResponse:
         """
         优化搜索关键词
-        
+
         Args:
             original_query: Agent生成的原始搜索查询
             context: 额外的上下文信息（如段落标题、内容描述等）
-            
+
         Returns:
             KeywordOptimizationResponse: 优化后的关键词列表
         """
+        cache_key = self._cache_key(original_query, context)
+        cached = self._cache_get(cache_key)
+        if cached is not None:
+            logger.info(f"🔍 关键词优化中间件: 命中缓存 '{original_query}'")
+            return cached
+
         logger.info(f"🔍 关键词优化中间件: 处理查询 '{original_query}'")
         
         try:
@@ -106,46 +141,51 @@ class KeywordOptimizer:
                         
                     
                     
-                    return KeywordOptimizationResponse(
+                    return self._cached(cache_key, KeywordOptimizationResponse(
                         original_query=original_query,
                         optimized_keywords=validated_keywords,
                         reasoning=reasoning,
                         success=True
-                    )
-                
+                    ))
+
                 except Exception as e:
                     logger.exception(f"⚠️ 解析响应失败，使用备用方案: {str(e)}")
                     # 备用方案：从原始查询中提取关键词
                     fallback_keywords = self._fallback_keyword_extraction(original_query)
-                    return KeywordOptimizationResponse(
+                    return self._cached(cache_key, KeywordOptimizationResponse(
                         original_query=original_query,
                         optimized_keywords=fallback_keywords,
                         reasoning="API响应解析失败，使用备用关键词提取",
                         success=True
-                    )
+                    ))
             else:
                 logger.error(f"❌ API调用失败: {response['error']}")
                 # 使用备用方案
                 fallback_keywords = self._fallback_keyword_extraction(original_query)
-                return KeywordOptimizationResponse(
+                return self._cached(cache_key, KeywordOptimizationResponse(
                     original_query=original_query,
                     optimized_keywords=fallback_keywords,
                     reasoning="API调用失败，使用备用关键词提取",
                     success=True,
                     error_message=response['error']
-                )
-                
+                ))
+
         except Exception as e:
             logger.error(f"❌ 关键词优化失败: {str(e)}")
             # 最终备用方案
             fallback_keywords = self._fallback_keyword_extraction(original_query)
-            return KeywordOptimizationResponse(
+            return self._cached(cache_key, KeywordOptimizationResponse(
                 original_query=original_query,
                 optimized_keywords=fallback_keywords,
                 reasoning="系统错误，使用备用关键词提取",
                 success=False,
                 error_message=str(e)
-            )
+            ))
+
+    def _cached(self, cache_key: str, response) -> "KeywordOptimizationResponse":
+        """写入缓存并返回响应"""
+        self._cache_set(cache_key, response)
+        return response
     
     def _build_system_prompt(self) -> str:
         """构建系统prompt"""
@@ -156,8 +196,16 @@ class KeywordOptimizer:
 2. **避免专业术语**：不使用"舆情"、"传播"、"倾向"、"展望"等官方词汇
 3. **简洁具体**：每个关键词要非常简洁明了，便于数据库匹配
 4. **情感丰富**：包含网民常用的情感表达词汇
-5. **数量控制**：最少提供10个关键词，最多提供20个关键词
+5. **数量控制**：最少提供3个关键词，最多提供5个关键词
 6. **避免重复**：不要脱离初始查询的主题
+
+**⚠️ 长度硬性限制（极其重要）**：
+底层检索是**精确子串匹配**——数据库内容必须原样包含这个词才能命中。
+所以关键词**必须短**：
+- **每个关键词长度 2~6 个字**，只保留主体词，不要拼接修饰语
+- ❌ 错误："通用人工智能争议"、"AI辅助诊断医保"、"医疗AI进医保"、"AI监管新规一周年"
+- ✅ 正确："人工智能"、"AI"、"大模型"、"盘古"、"医保"
+- 长尾复合词在真实语料里几乎不存在，会导致零命中
 
 **重要提醒**：每个关键词都必须是一个不可分割的独立词条，严禁在词条内部包含空格。例如，应使用 "雷军班争议" 而不是错误的 "雷军班 争议"。
 
@@ -239,35 +287,42 @@ class KeywordOptimizer:
         
         # 清理和验证关键词
         cleaned_keywords = []
-        for keyword in keywords[:20]:  # 最多20个
-            keyword = keyword.strip().strip('"\'""''')
-            if keyword and len(keyword) <= 20:  # 合理长度
+        for keyword in keywords[:5]:  # 最多5个
+            keyword = keyword.strip().strip('"\'""\'')
+            if keyword and len(keyword) <= 8:  # 主体词长度上限
                 cleaned_keywords.append(keyword)
-        
-        return cleaned_keywords[:20]
+
+        return cleaned_keywords[:5]
     
     def _validate_keywords(self, keywords: List[str]) -> List[str]:
         """验证和清理关键词"""
         validated = []
-        
+
         # 不良关键词（过于专业或官方）
         bad_keywords = {
             '态度分析', '公众反应', '情绪倾向',
             '未来展望', '发展趋势', '战略规划', '政策导向', '管理机制'
         }
-        
+
+        # 长度上限：底层是 LIKE '%kw%' 精确子串匹配，
+        # 长尾复合词（"通用人工智能争议"、"AI辅助诊断医保"）在真实语料里
+        # 几乎不存在，会导致零命中 -> 拿不到数据 -> LLM 编造内容
+        max_len = 8
+        max_keywords = 5
+
         for keyword in keywords:
             if isinstance(keyword, str):
-                keyword = keyword.strip().strip('"\'""''')
-                
+                keyword = keyword.strip().strip('"\'""\'')
+
                 # 基本验证
-                if (keyword and 
-                    len(keyword) <= 20 and 
+                if (keyword and
+                    len(keyword) <= max_len and
                     len(keyword) >= 1 and
                     not any(bad_word in keyword for bad_word in bad_keywords)):
-                    validated.append(keyword)
-        
-        return validated[:20]  # 最多返回20个关键词
+                    if keyword not in validated:
+                        validated.append(keyword)
+
+        return validated[:max_keywords]
     
     def _fallback_keyword_extraction(self, original_query: str) -> List[str]:
         """备用关键词提取方案"""
@@ -285,13 +340,14 @@ class KeywordOptimizer:
             token = token.strip()
             if token and token not in stop_words and len(token) >= 2:
                 keywords.append(token)
-        
+
         # 如果没有有效关键词，使用原始查询的第一个词
         if not keywords:
             first_word = original_query.split()[0] if original_query.split() else original_query
             keywords = [first_word] if first_word else ["热门"]
-        
-        return keywords[:20]
+
+        # 备用方案也不能太长，否则同样会零命中
+        return [k for k in keywords if len(k) <= 8][:5]
 
 # 全局实例
 keyword_optimizer = KeywordOptimizer()

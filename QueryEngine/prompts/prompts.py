@@ -51,6 +51,10 @@ input_schema_first_summary = {
         "search_results": {
             "type": "array",
             "items": {"type": "string"}
+        },
+        "search_result_count": {
+            "type": "integer",
+            "description": "本次检索实际命中的结果条数，写数字时以此为准"
         }
     }
 }
@@ -96,6 +100,10 @@ input_schema_reflection_summary = {
         "search_results": {
             "type": "array",
             "items": {"type": "string"}
+        },
+        "search_result_count": {
+            "type": "integer",
+            "description": "本次反思检索实际命中的结果条数，写数字时以此为准"
         },
         "paragraph_latest_state": {"type": "string"}
     }
