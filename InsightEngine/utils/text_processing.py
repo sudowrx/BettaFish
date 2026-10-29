@@ -348,9 +348,16 @@ def build_search_stats_block(search_results: List[Dict[str, Any]]) -> str:
         f"按日分布：{day_desc}",
     ]
     if sentiment_counts:
-        dist = "、".join(f"{k} {v}条({v/total*100:.1f}%)"
+        # 分母必须是「已标注条数」而不是总条数。评论类结果没有情感标注，
+        # 用总条数当分母会把占比系统性压低（实测 23/44=52.3%，
+        # 而按已标注的 36 条算是 63.9% —— 两者都不是真实分布，
+        # 因为 LLM 引用的是统计块里的数，分母必须唯一且可复算）。
+        labeled = sum(sentiment_counts.values())
+        dist = "、".join(f"{k} {v}条({v/labeled*100:.1f}%)"
                         for k, v in sorted(sentiment_counts.items(), key=lambda kv: -kv[1]))
-        parts.append(f"情感分布（模型标注）：{dist}")
+        parts.append(f"情感分布（模型标注）：{dist}（基于已标注的 {labeled}/{total} 条）")
+        if labeled < total:
+            parts.append(f"另有 {total - labeled} 条无情感标注，**不得把未标注的算入任何情感占比**")
     else:
         parts.append("情感分布：本批数据未做情感标注，**不得自行判定正负面或编造百分比**")
     if engagement_total:
@@ -416,6 +423,16 @@ def format_search_results_for_prompt(search_results: List[Dict[str, Any]],
                     eng_parts.append(f"{label}={val}")
             if eng_parts:
                 meta_parts.append("互动数(" + ", ".join(eng_parts) + ")")
+                # 必须给出预计算的单条总量。LLM 拿三个分量自己去加，
+                # 会把 A 账号的总量安到 B 账号头上（实测 @Joken 真实 100，
+                # 报告写成 735 —— 735 其实是 @硬核看板 的互动量）。
+                try:
+                    single_total = sum(int(engagement.get(k) or 0)
+                                       for k in ('likes', 'comments', 'shares'))
+                except (TypeError, ValueError):
+                    single_total = 0
+                if single_total:
+                    meta_parts.append(f"单条总互动={single_total}次")
         source_keyword = result.get('source_keyword')
         if source_keyword:
             meta_parts.append(f"来源关键词={source_keyword}")

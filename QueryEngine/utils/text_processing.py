@@ -404,6 +404,16 @@ def format_search_results_for_prompt(search_results: List[Dict[str, Any]],
                     eng_parts.append(f"{label}={val}")
             if eng_parts:
                 meta_parts.append("互动数(" + ", ".join(eng_parts) + ")")
+                # 必须给出预计算的单条总量。LLM 拿三个分量自己去加，
+                # 会把 A 账号的总量安到 B 账号头上（实测 @Joken 真实 100，
+                # 报告写成 735 —— 735 其实是 @硬核看板 的互动量）。
+                try:
+                    single_total = sum(int(engagement.get(k) or 0)
+                                       for k in ('likes', 'comments', 'shares'))
+                except (TypeError, ValueError):
+                    single_total = 0
+                if single_total:
+                    meta_parts.append(f"单条总互动={single_total}次")
         source_keyword = result.get('source_keyword')
         if source_keyword:
             meta_parts.append(f"来源关键词={source_keyword}")
