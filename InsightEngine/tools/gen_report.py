@@ -16,9 +16,15 @@ import sys
 import time
 import glob
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-os.chdir(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+TOOLS_DIR = os.path.dirname(os.path.abspath(__file__))
+ENGINE_DIR = os.path.dirname(TOOLS_DIR)          # .../BettaFish/InsightEngine
+PROJECT_ROOT = os.path.dirname(ENGINE_DIR)       # .../BettaFish
+
+# `from InsightEngine.agent import ...` 需要项目根在 sys.path 里
+# （BettaFish/），不是 InsightEngine/ —— 插错层级会 ImportError
+sys.path.insert(0, PROJECT_ROOT)
+# 工作目录设为 InsightEngine/，这样 reports/ 相对路径才对
+os.chdir(ENGINE_DIR)
 
 from dotenv import load_dotenv
 
